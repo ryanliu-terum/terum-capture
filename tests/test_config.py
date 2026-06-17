@@ -1,4 +1,5 @@
 """Tests for config load/save/delete."""
+import http.client
 import json
 import os
 import tempfile
@@ -7,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from terum_capture.config import load_config, save_config, delete_config
+from terum_capture.config import load_config, save_config, delete_config, CallbackServer, CORS_ORIGIN
 
 
 class TestConfig:
@@ -63,3 +64,53 @@ class TestConfig:
     def test_delete_missing_is_noop(self):
         with patch("terum_capture.config.CONFIG_FILE", self.config_file):
             delete_config()  # should not raise
+
+
+class TestCallbackServerCors:
+    """The dashboard (public HTTPS origin) POSTs to this loopback server, so the
+    responses must carry CORS + the Private Network Access opt-in header."""
+
+    def test_options_preflight_carries_cors_and_pna_headers(self):
+        server = CallbackServer()
+        port = server.start()
+        assert port is not None, "could not bind a callback port"
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.request(
+                "OPTIONS",
+                "/callback",
+                headers={
+                    "Origin": CORS_ORIGIN,
+                    "Access-Control-Request-Method": "POST",
+                    "Access-Control-Request-Private-Network": "true",
+                },
+            )
+            resp = conn.getresponse()
+            resp.read()
+            assert resp.status == 204
+            assert resp.getheader("Access-Control-Allow-Origin") == CORS_ORIGIN
+            assert resp.getheader("Access-Control-Allow-Methods") == "POST, OPTIONS"
+            # The PNA opt-in — without it Chrome rejects the public->loopback preflight.
+            assert resp.getheader("Access-Control-Allow-Private-Network") == "true"
+            conn.close()
+        finally:
+            if server._httpd is not None:
+                server._httpd.shutdown()
+
+    def test_post_callback_carries_pna_header_and_records_body(self):
+        server = CallbackServer()
+        port = server.start()
+        assert port is not None, "could not bind a callback port"
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request(
+            "POST",
+            "/callback",
+            body=json.dumps({"state": "s" * 32, "token": "jwt-abc"}),
+            headers={"Content-Type": "application/json"},
+        )
+        resp = conn.getresponse()
+        data = resp.read()
+        assert resp.status == 200
+        assert resp.getheader("Access-Control-Allow-Private-Network") == "true"
+        assert data == b'{"ok": true}'
+        conn.close()  # do_POST schedules its own shutdown after responding
