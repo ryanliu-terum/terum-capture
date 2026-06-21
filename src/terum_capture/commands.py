@@ -130,6 +130,24 @@ def _browser_auth(api_url: str) -> str | None:
     return result.get("token")
 
 
+def _is_our_stop_entry(entry: dict) -> bool:
+    """True if a Stop-hooks list entry is the terum-capture upload hook.
+
+    Handles both the current matcher-group shape ({"hooks": [{"command": ...}]})
+    and the legacy flat shape ({"command": ...}) written by older versions, so we
+    can detect, migrate, and remove either.
+    """
+    if not isinstance(entry, dict):
+        return False
+    inner = entry.get("hooks")
+    if isinstance(inner, list):
+        return any(
+            isinstance(h, dict) and h.get("command") == "terum-capture upload"
+            for h in inner
+        )
+    return entry.get("command") == "terum-capture upload"
+
+
 def _configure_hook():
     try:
         CLAUDE_SETTINGS.parent.mkdir(parents=True, exist_ok=True)
@@ -140,12 +158,30 @@ def _configure_hook():
         hooks = settings.setdefault("hooks", {})
         stop_hooks = hooks.setdefault("Stop", [])
 
-        for hook in stop_hooks:
-            if isinstance(hook, dict) and hook.get("command") == "terum-capture upload":
-                return
+        # Claude Code expects each Stop entry to be a matcher group wrapping a
+        # "hooks" array. Build that shape, keep one copy, migrate any legacy
+        # flat-shape entry in place, and drop accidental duplicates.
+        new_stop_hooks = []
+        already_present = False
+        changed = False
+        for entry in stop_hooks:
+            if _is_our_stop_entry(entry):
+                if already_present:
+                    changed = True  # drop duplicate
+                    continue
+                already_present = True
+                if "hooks" not in entry:
+                    entry = {"hooks": [dict(HOOK_ENTRY)]}  # migrate flat -> group
+                    changed = True
+            new_stop_hooks.append(entry)
 
-        stop_hooks.append(HOOK_ENTRY)
-        CLAUDE_SETTINGS.write_text(json.dumps(settings, indent=2) + "\n")
+        if not already_present:
+            new_stop_hooks.append({"hooks": [dict(HOOK_ENTRY)]})
+            changed = True
+
+        if changed:
+            hooks["Stop"] = new_stop_hooks
+            CLAUDE_SETTINGS.write_text(json.dumps(settings, indent=2) + "\n")
     except Exception as exc:
         print(f"Warning: Could not configure hook: {exc}")
 
@@ -175,10 +211,7 @@ def _remove_hook():
         settings = json.loads(CLAUDE_SETTINGS.read_text())
         hooks = settings.get("hooks", {})
         stop_hooks = hooks.get("Stop", [])
-        hooks["Stop"] = [
-            h for h in stop_hooks
-            if not (isinstance(h, dict) and h.get("command") == "terum-capture upload")
-        ]
+        hooks["Stop"] = [h for h in stop_hooks if not _is_our_stop_entry(h)]
         if not hooks["Stop"]:
             del hooks["Stop"]
         if not hooks:
