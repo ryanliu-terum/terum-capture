@@ -15,11 +15,38 @@ DASHBOARD_URL = "https://app.terum.ai"
 CLAUDE_SETTINGS = Path.home() / ".claude" / "settings.json"
 CLAUDE_MD = Path.home() / ".claude" / "CLAUDE.md"
 
-HOOK_ENTRY = {
-    "type": "command",
-    "command": "terum-capture upload",
-    "timeout": 15,
-}
+HOOK_TIMEOUT = 15
+
+# Substrings that identify our Stop hook across versions, so we can detect,
+# migrate, and remove either form:
+#   - "terum_capture upload" — the current python-routed command (`-m terum_capture upload`)
+#   - "terum-capture upload" — the legacy bare console-script shim
+# (The pipx venv path contains "terum-capture" but never "terum-capture upload",
+# so it can't false-match.)
+HOOK_UPLOAD_MARKERS = ("terum_capture upload", "terum-capture upload")
+
+
+def _hook_command() -> str:
+    """The Stop-hook command, routed through the signed Python interpreter.
+
+    At `terum-capture setup` time this process IS running inside the interpreter
+    that has the package installed (the pipx venv python, or the user's python).
+    That interpreter is code-signed (e.g. PSF Authenticode), so Windows Smart App
+    Control / WDAC permit it — unlike the unsigned pip/pipx console-script `.exe`
+    shim, which they block on enforcing machines ("An Application Control policy
+    has blocked this file"), silently killing capture every session.
+
+    `Path.as_posix()` yields a forward-slash, drive-letter path that the Git Bash
+    which runs Claude Code hooks on Windows executes correctly; it's a no-op on
+    POSIX. The path is quoted to survive spaces (e.g. "C:/Users/Jane Doe/...").
+    """
+    python = Path(sys.executable).as_posix()
+    return f'"{python}" -m terum_capture upload'
+
+
+def _hook_entry() -> dict:
+    return {"type": "command", "command": _hook_command(), "timeout": HOOK_TIMEOUT}
+
 
 CLAUDE_MD_BLOCK = """
 ## Terum Knowledge Capture
@@ -130,22 +157,24 @@ def _browser_auth(api_url: str) -> str | None:
     return result.get("token")
 
 
+def _is_our_command(command: object) -> bool:
+    return isinstance(command, str) and any(m in command for m in HOOK_UPLOAD_MARKERS)
+
+
 def _is_our_stop_entry(entry: dict) -> bool:
     """True if a Stop-hooks list entry is the terum-capture upload hook.
 
-    Handles both the current matcher-group shape ({"hooks": [{"command": ...}]})
-    and the legacy flat shape ({"command": ...}) written by older versions, so we
-    can detect, migrate, and remove either.
+    Matches the current python-routed command (`"<python>" -m terum_capture upload`)
+    AND the legacy bare-shim command (`terum-capture upload`), so we can detect,
+    migrate, and remove either. Handles both the current matcher-group shape
+    ({"hooks": [{"command": ...}]}) and the legacy flat shape ({"command": ...}).
     """
     if not isinstance(entry, dict):
         return False
     inner = entry.get("hooks")
     if isinstance(inner, list):
-        return any(
-            isinstance(h, dict) and h.get("command") == "terum-capture upload"
-            for h in inner
-        )
-    return entry.get("command") == "terum-capture upload"
+        return any(isinstance(h, dict) and _is_our_command(h.get("command")) for h in inner)
+    return _is_our_command(entry.get("command"))
 
 
 def _configure_hook():
@@ -159,8 +188,10 @@ def _configure_hook():
         stop_hooks = hooks.setdefault("Stop", [])
 
         # Claude Code expects each Stop entry to be a matcher group wrapping a
-        # "hooks" array. Build that shape, keep one copy, migrate any legacy
-        # flat-shape entry in place, and drop accidental duplicates.
+        # "hooks" array. Keep one copy normalized to the canonical group shape +
+        # current python-routed command (migrating the legacy flat shape and the
+        # legacy bare-shim command in place), and drop accidental duplicates.
+        canonical = {"hooks": [_hook_entry()]}
         new_stop_hooks = []
         already_present = False
         changed = False
@@ -170,13 +201,13 @@ def _configure_hook():
                     changed = True  # drop duplicate
                     continue
                 already_present = True
-                if "hooks" not in entry:
-                    entry = {"hooks": [dict(HOOK_ENTRY)]}  # migrate flat -> group
+                if entry != canonical:
+                    entry = canonical  # migrate shape and/or refresh command
                     changed = True
             new_stop_hooks.append(entry)
 
         if not already_present:
-            new_stop_hooks.append({"hooks": [dict(HOOK_ENTRY)]})
+            new_stop_hooks.append(canonical)
             changed = True
 
         if changed:
