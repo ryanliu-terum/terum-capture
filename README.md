@@ -36,7 +36,7 @@ After installing, run `terum-capture setup`, then **start a new Claude Code sess
 
 ## How it works
 
-- **Hook:** `setup` adds `{"type": "command", "command": "terum-capture upload", "timeout": 15}` to the `Stop` hooks in `~/.claude/settings.json`.
+- **Hook:** `setup` adds a `Stop` hook to `~/.claude/settings.json` that runs `"<python>" -m terum_capture upload` — routed through the signed Python interpreter (`sys.executable`) rather than the `terum-capture` console-script shim, because Windows Smart App Control / WDAC block unsigned pip/pipx `.exe` launchers on enforcing machines (which silently killed capture every session). `setup` migrates any older hook entry to this form; `logout` removes either.
 - **Incremental upload:** an offset sidecar at `~/.terum/sent_<session_id>` tracks how much of each transcript has been sent, so only new turns are uploaded. Sidecars older than 7 days are cleaned up automatically.
 - **What's captured:** your prompts and Claude's **text** responses (thinking blocks, tool calls, and tool results are stripped), the conversation title, the working directory, and session-level token usage. Trivial turns (< 10 chars) are dropped.
 - **Config:** your API key lives in `~/.terum/config.json` (created `chmod 600`).
