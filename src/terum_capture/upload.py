@@ -1,5 +1,7 @@
 import json
 import os
+import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -11,6 +13,89 @@ from terum_capture.config import load_config
 TERUM_DIR = Path.home() / ".terum"
 MAX_EVENTS_PER_BATCH = 50
 HTTP_TIMEOUT = 10.0
+GIT_TIMEOUT = 5.0
+
+# git remote URL forms we normalize to a canonical "owner/repo":
+#   SCP:  [user@]host:owner/repo            e.g. git@github.com:owner/repo
+#   URL:  scheme://[userinfo@]host[:port]/owner/repo
+_SCP_RE = re.compile(r"^[^/@]+@[^/:]+:(?P<path>.+)$")
+_URL_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://[^/]+/(?P<path>.+)$")
+
+
+def _parse_owner_repo(url: str | None) -> str | None:
+    """Normalize a git remote URL to a canonical "owner/repo" path.
+
+    For URL forms the path is taken AFTER the host, so any embedded credential
+    (e.g. https://x-access-token:TOKEN@host/owner/repo) is dropped — a token must
+    never reach stored data. Returns None for anything that isn't a remote URL,
+    including raw filesystem paths, so this can never re-introduce bug-294's
+    cwd-as-repo behavior.
+    """
+    if not url:
+        return None
+    url = url.strip()
+    if not url:
+        return None
+    url = url.rstrip("/")
+    if url.endswith(".git"):
+        url = url[:-4]
+
+    m = _URL_RE.match(url) if "://" in url else _SCP_RE.match(url)
+    if not m:
+        return None
+    path = m.group("path").strip("/")
+    # A real owner/repo always has a separator; a bare token/segment does not.
+    if "/" not in path:
+        return None
+    return path or None
+
+
+def _git(cwd: str, args: list[str]) -> str | None:
+    """Run `git -C <cwd> <args>`; return trimmed stdout, or None on any failure.
+
+    A timeout bounds a hung git so it can never stall the Stop hook; any spawn
+    error (git missing), non-zero exit (not a repo), or timeout degrades to None.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", cwd, *args],
+            capture_output=True,
+            text=True,
+            timeout=GIT_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    out = (result.stdout or "").strip()
+    return out or None
+
+
+def derive_repo(cwd: str | None) -> str | None:
+    """Stable, location-independent repo identity from the git remote at cwd.
+
+    Fallback chain: origin remote -> first other remote -> repo-root basename ->
+    None. Git resolves all of these from any subdirectory or worktree of the
+    repo, so the same repo yields the same identity regardless of OS, checkout
+    path, or which subdir Claude Code ran in.
+    """
+    if not cwd:
+        return None
+    url = _git(cwd, ["config", "--get", "remote.origin.url"])
+    if not url:
+        remotes = _git(cwd, ["remote"])
+        if remotes:
+            first = remotes.splitlines()[0].strip()
+            if first:
+                url = _git(cwd, ["config", "--get", f"remote.{first}.url"])
+    repo = _parse_owner_repo(url) if url else None
+    if repo:
+        return repo
+    toplevel = _git(cwd, ["rev-parse", "--show-toplevel"])
+    if toplevel:
+        base = toplevel.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+        return base or None
+    return None
 
 
 def cmd_upload():
@@ -148,6 +233,10 @@ def _do_upload():
         _cleanup_old_sidecars()
         return
 
+    # Stable repo identity (bug-294): one git resolution per session, sent on every
+    # event so the backend keys/names projects by repo instead of the raw cwd basename.
+    repo = derive_repo(cwd)
+
     events = []
     for prompt, response, ts in turns[:MAX_EVENTS_PER_BATCH]:
         event: dict = {
@@ -161,6 +250,8 @@ def _do_upload():
             event["conversationTitle"] = title
         if cwd:
             event["cwd"] = cwd
+        if repo:
+            event["repo"] = repo
         has_tokens = token_input or token_cache_creation or token_cache_read or token_output
         if has_tokens:
             event["tokenInput"] = token_input
