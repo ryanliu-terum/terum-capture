@@ -223,6 +223,16 @@ class TestStatusTaxonomy:
         assert result.status == "unconfigured"
         assert post.call_count == 0
 
+    def test_unconfigured_when_no_api_url(self):
+        # api_key present but api_url absent -> must short-circuit to "unconfigured",
+        # not fall through to _post_events and KeyError on config['api_url'].
+        with _harness(config={"api_key": "trm_test"}) as (post, td):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = _write_transcript(tmp, self._single())
+                result = upload.process_transcript(path, "s", "/c", max_batch=None)
+        assert result.status == "unconfigured"
+        assert post.call_count == 0
+
 
 class TestUnicodeRobustness:
     def test_unicode_transcript_does_not_crash(self):

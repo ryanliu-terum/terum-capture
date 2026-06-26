@@ -286,7 +286,9 @@ def _remove_hook():
 
 def cmd_status():
     config = load_config()
-    if not config or not config.get("api_key"):
+    if not config or not config.get("api_key") or not config.get("api_url"):
+        # api_url is required below (config['api_url'] for the /keys/me probe); a
+        # config missing it is "not configured", not a crash.
         print("Not configured. Run: terum-capture setup")
         sys.exit(1)
 

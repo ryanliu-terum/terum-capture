@@ -174,7 +174,13 @@ def process_transcript(
         return ProcessResult("invalid")
 
     config = load_config()
-    if not config or not config.get("api_key", "").startswith("trm_"):
+    if (
+        not config
+        or not config.get("api_key", "").startswith("trm_")
+        or not config.get("api_url")
+    ):
+        # api_url is required: _post_events reads config['api_url'] directly, so a
+        # config missing it must short-circuit here rather than KeyError mid-upload.
         return ProcessResult("unconfigured")
 
     sidecar = TERUM_DIR / f"sent_{session_id}"
