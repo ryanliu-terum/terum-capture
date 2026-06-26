@@ -27,12 +27,15 @@ After installing, run `terum-capture setup`, then **start a new Claude Code sess
 
 | Command | What it does |
 |---------|--------------|
-| `terum-capture setup` | Browser login → creates an API key, installs the Stop hook in `~/.claude/settings.json`, and appends a short summary instruction to `~/.claude/CLAUDE.md`. |
+| `terum-capture setup` | Browser login → creates an API key, installs the Stop hook in `~/.claude/settings.json`, and appends a short summary instruction to `~/.claude/CLAUDE.md`. Interactive setup then offers to import your past sessions. |
+| `terum-capture backfill` | Import your **existing** Claude Code sessions (last 30 days by default) into Terum, so a fresh install isn't starting from an empty graph. Re-runnable and crash-safe — already-sent sessions are skipped. |
 | `terum-capture status` | Show your key prefix, API URL, and whether the key is still valid. |
 | `terum-capture logout` | Remove local config and uninstall the hook. **Does not revoke the key** — revoke that from the dashboard. |
 | `terum-capture upload` | Invoked automatically by the Stop hook (reads hook input from stdin). You don't run this manually. |
 
-`setup` accepts `--url <api>` (defaults to `https://api.terum.ai/api`) and `--token <jwt>` to skip the browser for headless/CI installs.
+`setup` accepts `--url <api>` (defaults to `https://api.terum.ai/api`) and `--token <jwt>` to skip the browser for headless/CI installs (non-interactive setup skips the backfill prompt).
+
+`backfill` accepts `--days N` (window, default 30), `--all` (no time window — import everything), and `--limit N` (cap the number of sessions). It discovers transcripts under `~/.claude/projects/`, paces uploads under the server rate limit, backs off on throttling, and reports how many were imported vs. already captured. Uploaded sessions finish processing server-side asynchronously over the next day or so.
 
 ## How it works
 

@@ -64,6 +64,9 @@ makes the captured data richer.
 
 def cmd_setup(api_url: str | None = None, token: str | None = None):
     api_url = api_url or DEFAULT_API_URL
+    # Whether a token was passed non-interactively (--token). Captured before
+    # _browser_auth reassigns `token`, so the backfill auto-prompt can stay TTY-gated.
+    token_supplied = token is not None
 
     config = load_config()
     if config and config.get("api_key", "").startswith("trm_"):
@@ -137,6 +140,35 @@ def cmd_setup(api_url: str | None = None, token: str | None = None):
     print("\nClaude Code hook configured — your sessions will be captured automatically.")
     print("A summary instruction was added to ~/.claude/CLAUDE.md.")
     print("\nNo further setup needed. Start a new Claude Code session to begin capturing.")
+
+    _maybe_offer_backfill(interactive=not token_supplied and sys.stdin.isatty())
+
+
+def _maybe_offer_backfill(interactive: bool):
+    """Offer to import past sessions after connecting (spec Δ4).
+
+    Interactive setup confirms (default-yes) before importing; non-interactive setup
+    (--token / no TTY) just prints the one-liner so an automated install never blocks
+    on input and never silently runs a large upload the operator didn't ask for.
+    """
+    from terum_capture.backfill import cmd_backfill, discover_sessions
+
+    if not interactive:
+        print("\nRun 'terum-capture backfill' anytime to import your past Claude Code sessions.")
+        return
+
+    n = len(discover_sessions())  # default 30-day window, discovery only — no POSTs
+    if n == 0:
+        print("\nRun 'terum-capture backfill' anytime to import your past Claude Code sessions.")
+        return
+
+    answer = input(
+        f"\nFound {n} Claude Code sessions from the last 30 days. Import them now? [Y/n] "
+    ).strip().lower()
+    if answer in ("", "y", "yes"):
+        cmd_backfill()
+    else:
+        print("Run 'terum-capture backfill' anytime to import your past sessions.")
 
 
 def _browser_auth(api_url: str) -> str | None:
@@ -254,7 +286,9 @@ def _remove_hook():
 
 def cmd_status():
     config = load_config()
-    if not config or not config.get("api_key"):
+    if not config or not config.get("api_key") or not config.get("api_url"):
+        # api_url is required below (config['api_url'] for the /keys/me probe); a
+        # config missing it is "not configured", not a crash.
         print("Not configured. Run: terum-capture setup")
         sys.exit(1)
 
