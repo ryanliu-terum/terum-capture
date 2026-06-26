@@ -250,6 +250,61 @@ class TestUnicodeRobustness:
         assert "🚀" in ev["response"]
 
 
+class TestReadEntriesByteOffset:
+    """_read_entries must seek byte-accurately so a CRLF transcript resumes cleanly.
+
+    The persisted offset is os.path.getsize() (bytes); on Windows, text-mode seeking to
+    that raw byte offset is undefined, so the read is done in binary mode.
+    """
+
+    def _write_crlf(self, path, objs, mode="wb"):
+        with open(path, mode) as f:
+            for obj in objs:
+                f.write(json.dumps(obj).encode("utf-8") + b"\r\n")
+
+    def test_reads_exactly_lines_after_byte_offset(self):
+        # Multibyte content before AND after the offset: byte length != char length, so a
+        # byte-accurate seek is required and decoded lines must stay intact.
+        l1 = {"type": "user", "message": {"content": "café ☕ first line, multibyte"}}
+        l2 = {"type": "assistant", "message": {"content": [{"type": "text", "text": "second"}]}}
+        l3 = {"type": "user", "message": {"content": "日本語 third line stays intact"}}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "t.jsonl")
+            self._write_crlf(path, [l1])
+            offset = os.path.getsize(path)  # byte offset after line 1 (incl. CRLF)
+            self._write_crlf(path, [l2, l3], mode="ab")
+            entries = upload._read_entries(path, offset)
+        assert [e["type"] for e in entries] == ["assistant", "user"]
+        assert entries[1]["message"]["content"] == "日本語 third line stays intact"
+
+    def test_offset_zero_reads_all_lines_unchanged(self):
+        objs = [
+            {"type": "user", "message": {"content": "first message here"}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "second"}]}},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "t.jsonl")
+            self._write_crlf(path, objs)
+            entries = upload._read_entries(path, 0)
+        assert [e["type"] for e in entries] == ["user", "assistant"]
+
+    def test_skips_non_utf8_and_bad_json_after_offset(self):
+        # A non-utf-8 byte sequence must be skipped, not crash the read (text mode would
+        # raise UnicodeDecodeError mid-iteration); bad-JSON lines are skipped too.
+        l1 = {"type": "user", "message": {"content": "first line long enough"}}
+        l2 = {"type": "assistant", "message": {"content": [{"type": "text", "text": "ok answer"}]}}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "t.jsonl")
+            with open(path, "wb") as f:
+                f.write(json.dumps(l1).encode("utf-8") + b"\r\n")
+                offset = f.tell()
+                f.write(b"\xff\xfe not valid utf-8 bytes\r\n")
+                f.write(b"{ not valid json at all\r\n")
+                f.write(json.dumps(l2).encode("utf-8") + b"\r\n")
+            entries = upload._read_entries(path, offset)
+        assert [e["type"] for e in entries] == ["assistant"]
+
+
 class TestRepoReuse:
     def test_repo_field_attached_when_derive_repo_returns_value(self):
         entries = [

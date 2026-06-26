@@ -239,13 +239,25 @@ def _scan_session_tokens(transcript_path: str) -> tuple[int, int, int, int]:
 
 
 def _read_entries(transcript_path: str, last_offset: int) -> list:
-    """Read+parse JSONL entries from last_offset to EOF, skipping blank/garbage lines."""
+    """Read+parse JSONL entries from last_offset (a BYTE offset) to EOF, skipping garbage.
+
+    Opened in binary mode so the persisted ``os.path.getsize()`` offset and ``seek()``
+    agree byte-for-byte. Text-mode seeking to an arbitrary byte offset is only well-defined
+    at 0 or a prior ``tell()`` cookie — on Windows, CRLF translation makes a raw getsize()
+    offset land unpredictably, so binary mode is the only byte-accurate resume. Each line is
+    utf-8 decoded per-line (mirrors _scan_session_tokens); a non-utf-8 or non-JSON line is
+    skipped rather than crashing the read, preserving the JSON-per-line skip-on-garbage
+    behavior. Offset 0 reads the whole file (no seek), unchanged from the prior text read.
+    """
     entries = []
-    with open(transcript_path, "r", encoding="utf-8") as f:
+    with open(transcript_path, "rb") as f:
         if last_offset > 0:
             f.seek(last_offset)
-        for line in f:
-            line = line.strip()
+        for raw in f:
+            try:
+                line = raw.decode("utf-8").strip()
+            except UnicodeDecodeError:
+                continue
             if not line:
                 continue
             try:
