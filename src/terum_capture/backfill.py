@@ -109,7 +109,7 @@ def _process_with_backoff(path: Path, config, *, sleep=time.sleep) -> ProcessRes
     result = ProcessResult("failed")
     for attempt in range(MAX_BACKOFF_RETRIES + 1):
         try:
-            result = process_transcript(path, session_id, cwd, max_batch=None)
+            result = process_transcript(str(path), session_id, cwd, max_batch=None)
         except Exception as exc:  # never let one bad session abort the whole run
             print(f"terum-capture: session {session_id} failed: {exc}", file=sys.stderr)
             return ProcessResult("failed")
