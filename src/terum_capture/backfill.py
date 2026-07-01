@@ -95,6 +95,60 @@ def _read_session_cwd(path: Path) -> str | None:
     return None
 
 
+def _safe_mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def discover_projects(*, projects_dir: Path | None = None) -> list[dict]:
+    """One entry per known Claude Code project, most-recent activity first.
+
+    `~/.claude/projects/<encoded>/` dir names are a lossy encoding of the project's cwd
+    (both `/` and literal `-` collapse to `-`), so they can't be reversed reliably. Instead
+    each project's REAL path is read from a transcript's `cwd` field — the same source
+    backfill trusts. Projects whose directory no longer exists on disk are dropped (you
+    can't install a hook into a moved/deleted repo). Entries dedupe by real path.
+
+    Returns dicts: {"path": Path, "mtime": float, "sessions": int}.
+    """
+    base = projects_dir or CLAUDE_PROJECTS
+    if not base.is_dir():
+        return []
+
+    out: dict[str, dict] = {}
+    for child in sorted(base.iterdir()):
+        if not child.is_dir():
+            continue
+        sessions = list(child.glob("*.jsonl"))
+        if not sessions:
+            continue
+        sessions.sort(key=_safe_mtime, reverse=True)  # newest first
+        # Every transcript in one encoded dir shares the same cwd, so read from the newest
+        # one that HAS a cwd — a summary-only/empty newest file must not drop an otherwise
+        # valid, still-existing project from the picker.
+        cwd = None
+        for s in sessions:
+            cwd = _read_session_cwd(s)
+            if cwd:
+                break
+        if not cwd:
+            continue
+        path = Path(cwd)
+        if not path.is_dir():
+            continue  # repo moved or deleted — nowhere to install a hook
+        mtime = _safe_mtime(sessions[0])  # recency = newest transcript, whichever gave the cwd
+        key = str(path)
+        if key in out:
+            out[key]["sessions"] += len(sessions)
+            out[key]["mtime"] = max(out[key]["mtime"], mtime)
+        else:
+            out[key] = {"path": path, "mtime": mtime, "sessions": len(sessions)}
+
+    return sorted(out.values(), key=lambda e: e["mtime"], reverse=True)
+
+
 def _process_with_backoff(path: Path, config, *, sleep=time.sleep) -> ProcessResult:
     """Process one session, retrying on 429 with exponential back-off.
 
