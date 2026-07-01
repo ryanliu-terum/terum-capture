@@ -3,6 +3,7 @@ import os
 import secrets
 import socket
 import sys
+import time
 import webbrowser
 from pathlib import Path
 
@@ -12,10 +13,134 @@ from terum_capture.config import load_config, save_config, delete_config, Callba
 
 DEFAULT_API_URL = "https://api.terum.ai/api"
 DASHBOARD_URL = "https://app.terum.ai"
+# Global-scope targets, used by `setup --global` / `logout --global`. The default
+# (project) scope resolves per-directory targets in _scope_targets().
 CLAUDE_SETTINGS = Path.home() / ".claude" / "settings.json"
 CLAUDE_MD = Path.home() / ".claude" / "CLAUDE.md"
 
 HOOK_TIMEOUT = 15
+
+# Files a project-scoped setup keeps out of version control (personal capture config).
+GITIGNORE_ENTRIES = (".claude/settings.local.json", "CLAUDE.local.md")
+
+
+def _scope_targets(use_global: bool, base: Path | None = None) -> tuple[Path, Path]:
+    """Resolve (settings_path, claude_md_path) for the chosen install scope.
+
+    Default (project) scope writes personal, git-ignored files in the directory `setup`
+    is run from — `.claude/settings.local.json` + `CLAUDE.local.md` — so only that repo's
+    Claude Code sessions are captured and nothing is committed. `--global` scope restores
+    the machine-wide targets in `~/.claude` (every project is captured).
+    """
+    if use_global:
+        return CLAUDE_SETTINGS, CLAUDE_MD
+    base = base or Path.cwd()
+    return base / ".claude" / "settings.local.json", base / "CLAUDE.local.md"
+
+
+def _display_path(path: Path) -> str:
+    """A short, friendly form of `path`: ./… under cwd, ~/… under home, else absolute."""
+    for root, prefix in ((Path.cwd(), "./"), (Path.home(), "~/")):
+        try:
+            return prefix + str(path.relative_to(root))
+        except ValueError:
+            continue
+    return str(path)
+
+
+def _home_path(path: Path) -> str:
+    """`~/…` when under home, else the absolute path — stable regardless of cwd.
+
+    Used for the project picker and multi-project summary, where a `./…` form (which
+    _display_path prefers) would be confusing for repos that aren't the current directory.
+    """
+    try:
+        return "~/" + str(path.relative_to(Path.home()))
+    except ValueError:
+        return str(path)
+
+
+def _relative_time(mtime: float | None, now: float) -> str:
+    """Coarse 'Nm/h/d ago' label for the picker; '' when the time is unknown."""
+    if not mtime:
+        return ""
+    secs = max(0.0, now - mtime)
+    if secs < 3600:
+        return f"{int(secs // 60)}m ago"
+    if secs < 86400:
+        return f"{int(secs // 3600)}h ago"
+    return f"{int(secs // 86400)}d ago"
+
+
+def _parse_selection(raw: str, count: int) -> tuple[str, list[int]]:
+    """Parse a picker answer into (kind, 1-based indices).
+
+    kind is one of: 'global' (g), 'all' (a), 'pick' (a valid subset, incl. the empty-Enter
+    default of the first row), 'none' (empty answer with nothing to pick), or 'invalid'
+    (tokens were given but none resolved — caller re-prompts). Accepts comma/space lists and
+    'x-y' ranges, e.g. '1,3' or '1-3 5'. Out-of-range/garbage tokens are dropped.
+    """
+    s = raw.strip().lower()
+    if s == "":
+        return ("pick", [1]) if count else ("none", [])
+    if s in ("g", "global"):
+        return ("global", [])
+    if s in ("a", "all"):
+        return ("all", list(range(1, count + 1)))
+
+    picked: list[int] = []
+    saw_token = False
+    for tok in s.replace(",", " ").split():
+        saw_token = True
+        if "-" in tok:
+            lo, _, hi = tok.partition("-")
+            if lo.isdigit() and hi.isdigit():
+                for n in range(int(lo), int(hi) + 1):
+                    if 1 <= n <= count and n not in picked:
+                        picked.append(n)
+        elif tok.isdigit():
+            n = int(tok)
+            if 1 <= n <= count and n not in picked:
+                picked.append(n)
+    if picked:
+        return ("pick", picked)
+    return ("invalid", []) if saw_token else ("none", [])
+
+
+def _in_git_repo(base: Path) -> bool:
+    """True if `base` (or any ancestor) is a git work tree — a `.git` dir OR file."""
+    return any((d / ".git").exists() for d in (base, *base.parents))
+
+
+def _ensure_gitignore(base: Path) -> bool:
+    """Add the project-scoped capture files to `<base>/.gitignore` (idempotent).
+
+    Only touches `.gitignore` inside a git work tree, so a non-repo directory never gets a
+    stray file. Presence is tested by exact line match (bare or `/`-anchored form), NOT a
+    naive substring scan — otherwise a filename merely mentioned in a comment or a different
+    subpath would false-skip the rule and leave the file committable. Returns True only when
+    it actually wrote new entries. Honors the "git-ignored" promise so a project-local
+    hook/note can't be accidentally committed.
+    """
+    if not _in_git_repo(base):
+        return False
+    try:
+        gitignore = base / ".gitignore"
+        existing = gitignore.read_text() if gitignore.exists() else ""
+        present = {ln.strip() for ln in existing.splitlines()}
+        missing = [e for e in GITIGNORE_ENTRIES if e not in present and "/" + e not in present]
+        if not missing:
+            return False
+        with open(gitignore, "a") as f:
+            if existing and not existing.endswith("\n"):
+                f.write("\n")
+            if existing:
+                f.write("\n")
+            f.write("# Terum capture (personal — do not commit)\n")
+            f.write("\n".join(missing) + "\n")
+        return True
+    except OSError:
+        return False
 
 # Substrings that identify our Stop hook across versions, so we can detect,
 # migrate, and remove either form:
@@ -62,7 +187,111 @@ makes the captured data richer.
 """
 
 
-def cmd_setup(api_url: str | None = None, token: str | None = None):
+MAX_PICKER_ROWS = 25
+
+
+def _prompt_project_scope(cwd: Path) -> tuple[bool, list[Path]]:
+    """Interactive scope step: pick which project(s) to capture, or go global.
+
+    Returns (use_global, bases). Lists the machine's known Claude Code projects (newest
+    first), always with the current directory as the recommended first row, and accepts any
+    subset ('1,3' / '1-3'), 'a' for all listed, or 'g' for global. Re-prompts on garbage.
+    """
+    from terum_capture.backfill import discover_projects
+
+    now = time.time()
+
+    # Current directory is always row 1 (the default), even with no prior sessions.
+    rows: list[dict] = [{"path": cwd, "mtime": None, "sessions": 0, "current": True}]
+    seen = {str(cwd)}
+    for e in discover_projects():
+        key = str(e["path"])
+        if key in seen:
+            if key == str(cwd):  # fold cwd's history into the current row
+                rows[0]["mtime"] = e["mtime"]
+                rows[0]["sessions"] = e["sessions"]
+            continue
+        seen.add(key)
+        rows.append({**e, "current": False})
+
+    shown = rows[:MAX_PICKER_ROWS]
+    hidden = len(rows) - len(shown)
+
+    print("\nWhich projects should Terum capture?")
+    print("A per-project hook is installed in each (git-ignored — nothing is committed).\n")
+    for i, r in enumerate(shown, 1):
+        label = (r["path"].name or str(r["path"]))[:24]
+        if r.get("current"):
+            meta = "current directory"
+        else:
+            meta = " · ".join(
+                x for x in (_relative_time(r.get("mtime"), now), f"{r['sessions']} sessions") if x
+            )
+        default = "  (default)" if i == 1 else ""
+        print(f"   {i}) {label:<24}  {_home_path(r['path'])}   [{meta}]{default}")
+    if hidden > 0:
+        print(f"   … and {hidden} more (use --project <path>, or 'g' for every project)")
+
+    while True:
+        try:
+            raw = input(
+                "\nEnter numbers (e.g. 1,3 or 1-3), 'a' = all listed, 'g' = every project [1]: "
+            )
+        except EOFError:
+            # Piped/closed stdin at the prompt — take the default (current directory) rather
+            # than crashing with a traceback after the key was already created.
+            return False, [cwd]
+        kind, idxs = _parse_selection(raw, len(shown))
+        if kind == "global":
+            return True, []
+        if kind in ("pick", "all"):
+            return False, [shown[i - 1]["path"] for i in idxs]
+        if kind == "none":
+            return False, [cwd]
+        print("Didn't recognize that — enter numbers like 1,3 or 1-3, or 'a'/'g'.")
+
+
+def _install_scope(use_global: bool, bases: list[Path] | None) -> list[dict]:
+    """Write the hook + note (+ .gitignore for project scope) for the chosen scope.
+
+    Returns one dict per installed target for the caller's summary. Project bases are
+    de-duplicated, and a base that isn't an existing directory is skipped with a warning —
+    so a typo'd --project path never silently creates a stray `.claude/` tree.
+    """
+    if use_global:
+        s, m = _scope_targets(True)
+        _configure_hook(s)
+        _append_claude_md(m)
+        return [{"global": True, "settings": s, "note": m, "gitignored": False}]
+
+    installed: list[dict] = []
+    seen: set[str] = set()
+    for base in bases or []:
+        # Absolutize a relative --project (e.g. '.', 'sub') BEFORE any git/gitignore work:
+        # _in_git_repo walks base.parents, and a relative path's parents stop at cwd, so a
+        # repo-subdir install would otherwise skip .gitignore and leave files committable.
+        base = Path(os.path.abspath(base.expanduser()))
+        key = str(base)
+        if key in seen:
+            continue
+        seen.add(key)
+        if not base.is_dir():
+            print(f"Warning: {base} is not a directory — skipping.")
+            continue
+        s, m = _scope_targets(False, base)
+        _configure_hook(s)
+        _append_claude_md(m)
+        gi = _ensure_gitignore(base)
+        installed.append({"global": False, "base": base, "settings": s, "note": m, "gitignored": gi})
+    return installed
+
+
+def cmd_setup(
+    api_url: str | None = None,
+    token: str | None = None,
+    use_global: bool = False,
+    projects: list[str] | None = None,
+):
     api_url = api_url or DEFAULT_API_URL
     # Whether a token was passed non-interactively (--token). Captured before
     # _browser_auth reassigns `token`, so the backfill auto-prompt can stay TTY-gated.
@@ -132,13 +361,47 @@ def cmd_setup(api_url: str | None = None, token: str | None = None):
         print("Error: Round-trip verification failed. Config deleted.")
         return
 
-    _configure_hook()
-    _append_claude_md()
+    # Resolve the capture scope. Explicit flags win and keep non-interactive installs
+    # unattended; otherwise an interactive terminal gets the project picker; a piped/CI
+    # install with no flags falls back to the current directory.
+    bases: list[Path] | None
+    if use_global:
+        bases = None
+    elif projects:
+        bases = [Path(p) for p in projects]
+    elif sys.stdin.isatty() and not token_supplied:
+        use_global, bases = _prompt_project_scope(Path.cwd())
+    else:
+        bases = [Path.cwd()]
+
+    installed = _install_scope(use_global, bases)
 
     prefix = api_key[:8]
     print(f"\nTerum connected! Key: {prefix}...")
-    print("\nClaude Code hook configured — your sessions will be captured automatically.")
-    print("A summary instruction was added to ~/.claude/CLAUDE.md.")
+
+    if use_global:
+        print("\nClaude Code hook installed globally — sessions in every project will be captured.")
+        print(f"A summary instruction was added to {_display_path(_scope_targets(True)[1])}.")
+    elif not installed:
+        print("\nNo project hook was installed. Run 'terum-capture setup' from a project,")
+        print("or 'terum-capture setup --global' to capture every project.")
+    else:
+        if len(installed) == 1:
+            print(f"\nClaude Code hook installed for this project:\n  {_home_path(installed[0]['base'])}")
+            print("Run 'terum-capture setup --global' to capture every project instead.")
+        else:
+            print(f"\nClaude Code hook installed for {len(installed)} projects:")
+            for t in installed:
+                print(f"  • {_home_path(t['base'])}")
+        print("A summary instruction was added to each project's CLAUDE.local.md.")
+        if any(t["gitignored"] for t in installed):
+            print("The capture files were added to .gitignore so they stay out of version control.")
+        if _global_hook_present():
+            print(
+                "\nNote: a global Terum hook is also installed (~/.claude/settings.json), so every\n"
+                "project is still captured. Run 'terum-capture logout --global' to remove it."
+            )
+
     print("\nNo further setup needed. Start a new Claude Code session to begin capturing.")
 
     _maybe_offer_backfill(interactive=not token_supplied and sys.stdin.isatty())
@@ -209,12 +472,36 @@ def _is_our_stop_entry(entry: dict) -> bool:
     return _is_our_command(entry.get("command"))
 
 
-def _configure_hook():
+def _settings_has_our_hook(settings_path: Path) -> bool:
+    """True if `settings_path` has a terum Stop hook. Robust to any malformed/absent JSON.
+
+    The whole read+navigate is guarded (incl. AttributeError) so a hand-edited settings
+    file whose top level or `hooks` value is not an object can never crash the caller.
+    """
     try:
-        CLAUDE_SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+        settings = json.loads(settings_path.read_text())
+        stop = settings.get("hooks", {}).get("Stop", [])
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return False
+    return isinstance(stop, list) and any(_is_our_stop_entry(e) for e in stop)
+
+
+def _global_hook_present() -> bool:
+    """True if a terum Stop hook is installed machine-wide in ~/.claude/settings.json.
+
+    Used to warn a project-scoped `setup` that a pre-existing global hook is still
+    capturing every project (it fires alongside the new project-local one), so the user
+    knows to `logout --global` if they want capture to actually be project-specific.
+    """
+    return _settings_has_our_hook(CLAUDE_SETTINGS)
+
+
+def _configure_hook(settings_path: Path):
+    try:
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
         settings: dict = {}
-        if CLAUDE_SETTINGS.exists():
-            settings = json.loads(CLAUDE_SETTINGS.read_text())
+        if settings_path.exists():
+            settings = json.loads(settings_path.read_text())
 
         hooks = settings.setdefault("hooks", {})
         stop_hooks = hooks.setdefault("Stop", [])
@@ -244,22 +531,22 @@ def _configure_hook():
 
         if changed:
             hooks["Stop"] = new_stop_hooks
-            CLAUDE_SETTINGS.write_text(json.dumps(settings, indent=2) + "\n")
+            settings_path.write_text(json.dumps(settings, indent=2) + "\n")
     except Exception as exc:
         print(f"Warning: Could not configure hook: {exc}")
 
 
-def _append_claude_md():
+def _append_claude_md(claude_md_path: Path):
     try:
-        CLAUDE_MD.parent.mkdir(parents=True, exist_ok=True)
+        claude_md_path.parent.mkdir(parents=True, exist_ok=True)
         existing = ""
-        if CLAUDE_MD.exists():
-            existing = CLAUDE_MD.read_text()
+        if claude_md_path.exists():
+            existing = claude_md_path.read_text()
 
         if "## Terum Knowledge Capture" in existing:
             return
 
-        with open(CLAUDE_MD, "a") as f:
+        with open(claude_md_path, "a") as f:
             if existing and not existing.endswith("\n"):
                 f.write("\n")
             f.write(CLAUDE_MD_BLOCK)
@@ -267,21 +554,25 @@ def _append_claude_md():
         print(f"Warning: Could not update CLAUDE.md: {exc}")
 
 
-def _remove_hook():
+def _remove_hook(settings_path: Path) -> bool:
+    """Remove the terum Stop hook from `settings_path`. Returns True if one was removed."""
     try:
-        if not CLAUDE_SETTINGS.exists():
-            return
-        settings = json.loads(CLAUDE_SETTINGS.read_text())
+        if not settings_path.exists():
+            return False
+        settings = json.loads(settings_path.read_text())
         hooks = settings.get("hooks", {})
         stop_hooks = hooks.get("Stop", [])
-        hooks["Stop"] = [h for h in stop_hooks if not _is_our_stop_entry(h)]
+        kept = [h for h in stop_hooks if not _is_our_stop_entry(h)]
+        removed = len(kept) != len(stop_hooks)
+        hooks["Stop"] = kept
         if not hooks["Stop"]:
             del hooks["Stop"]
         if not hooks:
             del settings["hooks"]
-        CLAUDE_SETTINGS.write_text(json.dumps(settings, indent=2) + "\n")
+        settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+        return removed
     except Exception:
-        pass
+        return False
 
 
 def cmd_status():
@@ -316,7 +607,7 @@ def cmd_status():
         sys.exit(1)
 
 
-def cmd_logout():
+def cmd_logout(use_global: bool = False, project: str | None = None):
     config = load_config()
     if not config:
         print("Not configured — nothing to do.")
@@ -328,6 +619,31 @@ def cmd_logout():
     if answer != "y":
         return
 
+    # The API key config is global, so it is always removed. The Stop hook is scope-
+    # specific: by default we uninstall this project's hook (--project <path> targets a
+    # different one); --global removes the machine-wide one. Hooks in other projects are
+    # left untouched — this only ever removes one project's hook per run.
+    base = Path(project).expanduser() if project else None
+    settings_path, _ = _scope_targets(use_global, base)
     delete_config()
-    _remove_hook()
-    print("Config removed and hook uninstalled.")
+    removed = _remove_hook(settings_path)
+    if removed:
+        print(f"Config removed and the hook uninstalled from {_display_path(settings_path)}.")
+    else:
+        print(f"Config removed. No Terum hook was found at {_display_path(settings_path)}.")
+
+    # A leftover hook in the OTHER scope keeps firing (now a harmless 'unconfigured' no-op
+    # since the config is gone). Point the user at the command that actually removes it —
+    # this closes the `setup --global` then bare `logout` footgun the message otherwise hides.
+    other_path, _ = _scope_targets(not use_global)
+    if _settings_has_our_hook(other_path):
+        if use_global:
+            print(
+                f"A project-local hook is still installed at {_display_path(other_path)} — "
+                "run 'terum-capture logout' from that project to remove it."
+            )
+        else:
+            print(
+                "A global Terum hook is still installed (~/.claude/settings.json) — "
+                "run 'terum-capture logout --global' to remove it."
+            )

@@ -38,6 +38,8 @@ def main():
         from terum_capture.commands import cmd_setup
         url = None
         token = None
+        use_global = False
+        projects: list[str] = []
         i = 1
         while i < len(args):
             if args[i] == "--url" and i + 1 < len(args):
@@ -46,9 +48,15 @@ def main():
             elif args[i] == "--token" and i + 1 < len(args):
                 token = args[i + 1]
                 i += 2
+            elif args[i] == "--project" and i + 1 < len(args):
+                projects.append(args[i + 1])  # repeatable: --project A --project B
+                i += 2
+            elif args[i] == "--global":
+                use_global = True
+                i += 1
             else:
                 i += 1
-        cmd_setup(api_url=url, token=token)
+        cmd_setup(api_url=url, token=token, use_global=use_global, projects=projects or None)
 
     elif command == "status":
         from terum_capture.commands import cmd_status
@@ -56,7 +64,15 @@ def main():
 
     elif command == "logout":
         from terum_capture.commands import cmd_logout
-        cmd_logout()
+        project = None
+        i = 1
+        while i < len(args):
+            if args[i] == "--project" and i + 1 < len(args):
+                project = args[i + 1]
+                i += 2
+            else:
+                i += 1
+        cmd_logout(use_global="--global" in args[1:], project=project)
 
     else:
         print(f"Unknown command: {command}")
