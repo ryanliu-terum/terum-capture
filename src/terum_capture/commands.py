@@ -15,7 +15,12 @@ DASHBOARD_URL = "https://app.terum.ai"
 CLAUDE_SETTINGS = Path.home() / ".claude" / "settings.json"
 CLAUDE_MD = Path.home() / ".claude" / "CLAUDE.md"
 
-HOOK_TIMEOUT = 15
+# 60s (not Claude Code's 15s default): a big session's first upload does a
+# whole-file read + git before the POST; 15s could kill it mid-work, and a
+# marker is only written on success, so the retry re-pays the same cost and the
+# session never captures (bug-416). _configure_hook refreshes installed users to
+# this value on their next `setup`.
+HOOK_TIMEOUT = 60
 
 # Substrings that identify our Stop hook across versions, so we can detect,
 # migrate, and remove either form:
