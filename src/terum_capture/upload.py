@@ -144,14 +144,72 @@ def _do_upload():
     )
 
 
-def _read_offset(sidecar: Path) -> int:
-    """The 'already sent up to here' byte offset, or 0 (fresh / unreadable / corrupt)."""
-    if not sidecar.exists():
-        return 0
+def _read_sidecar(path: Path) -> dict:
+    """Load persisted upload state: {"offset": int, "repo": str|None, "tokens": tuple|None}.
+
+    Backward compatible with the pre-bug-416 bare-integer sidecar (parsed as an offset
+    with no cached repo and no token baseline). A missing, empty, torn, or unparseable
+    sidecar resets to offset 0 — a full, safe reprocess, never a false "already sent".
+    ``tokens`` is the 4-tuple (input, cache_creation, cache_read, output) or None.
+    """
+    default = {"offset": 0, "repo": None, "tokens": None}
+    if not path.exists():
+        return default
     try:
-        return int(sidecar.read_text().strip())
-    except (ValueError, OSError):
-        return 0
+        raw = path.read_text().strip()
+    except OSError:
+        return default
+    if not raw:
+        return default
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        try:
+            return {"offset": int(raw), "repo": None, "tokens": None}
+        except ValueError:
+            return default
+    if isinstance(data, bool):
+        return default
+    if isinstance(data, int):
+        return {"offset": data, "repo": None, "tokens": None}
+    if not isinstance(data, dict):
+        return default
+    try:
+        offset = int(data.get("offset", 0))
+    except (ValueError, TypeError):
+        offset = 0
+    repo = data.get("repo")
+    if not isinstance(repo, str) or not repo:
+        repo = None
+    tokens = data.get("tokens")
+    if isinstance(tokens, list) and len(tokens) == 4 and all(isinstance(t, int) for t in tokens):
+        tokens = tuple(tokens)
+    else:
+        tokens = None
+    return {"offset": offset, "repo": repo, "tokens": tokens}
+
+
+def _write_sidecar(path: Path, offset: int, repo: str | None, tokens: tuple | None):
+    """Atomically persist upload state as JSON.
+
+    ``offset`` must only advance after a confirmed 2xx (the anti-data-loss invariant).
+    ``repo`` and ``tokens`` carry no delivery semantics, so they may be cached earlier —
+    writing them with an UNCHANGED offset cannot skip un-sent turns. The write goes
+    through a temp file + os.replace so a kill mid-write can never leave a torn sidecar
+    (a truncated read just resets to offset 0, which is safe).
+    """
+    payload: dict = {"offset": offset}
+    if repo:
+        payload["repo"] = repo
+    if tokens is not None:
+        payload["tokens"] = [int(t) for t in tokens]
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(payload))
+        os.replace(tmp, path)
+    except OSError:
+        pass
 
 
 def process_transcript(
@@ -184,57 +242,82 @@ def process_transcript(
         return ProcessResult("unconfigured")
 
     sidecar = TERUM_DIR / f"sent_{session_id}"
-    last_offset = _read_offset(sidecar)
+    state = _read_sidecar(sidecar)
+    last_offset = state["offset"]
 
     file_size = os.path.getsize(transcript_path)
     if file_size <= last_offset:
         _cleanup_old_sidecars()
         return ProcessResult("skipped")
 
-    tokens = _scan_session_tokens(transcript_path)
-    entries = _read_entries(transcript_path, last_offset)
+    # Read new entries ONCE and derive cumulative session token totals from them,
+    # instead of the prior whole-file token scan PLUS a second read from the offset —
+    # halving file I/O for the expensive, kill-prone offset-0 first upload (bug-416).
+    # Token totals span the whole session, so they are (persisted baseline up to
+    # last_offset) + (delta summed over the new entries):
+    #   - baseline present (new-format sidecar): read only the new bytes.
+    #   - offset 0 (first upload / crash recovery): baseline is 0, read == whole file.
+    #   - legacy bare-int sidecar with offset > 0: no baseline was persisted, so rescan
+    #     the whole file for tokens once (a one-time migration) and read entries from
+    #     the offset; it self-upgrades to the baseline format on the next success.
+    if state["tokens"] is not None:
+        entries = _read_entries(transcript_path, last_offset)
+        delta = _sum_tokens(entries)
+        tokens = tuple(state["tokens"][i] + delta[i] for i in range(4))
+    elif last_offset == 0:
+        entries = _read_entries(transcript_path, 0)
+        tokens = _sum_tokens(entries)
+    else:
+        tokens = _sum_tokens(_read_entries(transcript_path, 0))
+        entries = _read_entries(transcript_path, last_offset)
     new_offset = file_size
 
     title, turns = _parse_turns(entries)
 
     if not turns:
-        _update_sidecar(sidecar, new_offset)
+        # Bytes consumed, nothing to send — advance the confirmed offset and persist
+        # the token baseline so later incremental uploads stay cheap and correct;
+        # carry over any cached repo.
+        _write_sidecar(sidecar, new_offset, state["repo"], tokens)
         _cleanup_old_sidecars()
         return ProcessResult("no_turns")
 
-    # Stable repo identity (bug-294): one git resolution per session, sent on every
-    # event so the backend keys/names projects by repo instead of the raw cwd basename.
-    repo = derive_repo(cwd)
+    # Stable repo identity (bug-294): resolve git AT MOST ONCE per session and cache it
+    # in the sidecar BEFORE the POST (offset unchanged) so a process killed before the
+    # success marker — the bug-416 loss loop — does not re-pay the git spawns on the next
+    # retry. Caching repo carries no delivery semantics, so writing it with an unchanged
+    # offset can never skip un-sent turns.
+    repo = state["repo"]
+    if repo is None:
+        repo = derive_repo(cwd)
+        if repo:
+            _write_sidecar(sidecar, last_offset, repo, state["tokens"])
     selected = turns if max_batch is None else turns[:max_batch]
     events = _build_events(selected, session_id, title, cwd, repo, tokens)
 
-    result = _post_events(config, events, sidecar, new_offset)
+    result = _post_events(config, events, sidecar, new_offset, repo, tokens)
     _cleanup_old_sidecars()
     return result
 
 
-def _scan_session_tokens(transcript_path: str) -> tuple[int, int, int, int]:
-    """Sum session-level token usage across the full transcript (cheap integer scan)."""
+def _sum_tokens(entries: list) -> tuple[int, int, int, int]:
+    """Sum assistant `usage` token totals over already-parsed entries (in-memory, no I/O).
+
+    Summed over whichever entries are passed: the whole session (offset 0) or just the
+    new bytes (an incremental delta added to the persisted baseline).
+    """
     token_input = 0
     token_cache_creation = 0
     token_cache_read = 0
     token_output = 0
-    with open(transcript_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if entry.get("type") == "assistant":
-                usage = entry.get("message", {}).get("usage", {})
-                if usage:
-                    token_input += usage.get("input_tokens", 0)
-                    token_cache_creation += usage.get("cache_creation_input_tokens", 0)
-                    token_cache_read += usage.get("cache_read_input_tokens", 0)
-                    token_output += usage.get("output_tokens", 0)
+    for entry in entries:
+        if entry.get("type") == "assistant":
+            usage = entry.get("message", {}).get("usage", {})
+            if usage:
+                token_input += usage.get("input_tokens", 0)
+                token_cache_creation += usage.get("cache_creation_input_tokens", 0)
+                token_cache_read += usage.get("cache_read_input_tokens", 0)
+                token_output += usage.get("output_tokens", 0)
     return token_input, token_cache_creation, token_cache_read, token_output
 
 
@@ -357,11 +440,12 @@ def _build_events(turns, session_id, title, cwd, repo, tokens) -> list[dict]:
     return events
 
 
-def _post_events(config, events, sidecar, new_offset) -> ProcessResult:
+def _post_events(config, events, sidecar, new_offset, repo, tokens) -> ProcessResult:
     """POST events (chunked to the server's per-request cap) and advance the sidecar.
 
     The sidecar advances ONLY after every chunk returns 2xx (state-persistence-after-
-    success). A 429 is reported distinctly so the backfill caller can back off and retry
+    success), persisting the new offset alongside the cached repo + cumulative token
+    baseline. A 429 is reported distinctly so the backfill caller can back off and retry
     the whole session; any other failure leaves the offset untouched too, so a re-run
     re-sends and server dedup (conversation_id + capturedAt) collapses the overlap.
     """
@@ -381,16 +465,8 @@ def _post_events(config, events, sidecar, new_offset) -> ProcessResult:
             print(f"terum-capture: server returned {resp.status_code}", file=sys.stderr)
             return ProcessResult("failed", events=sent, status_code=resp.status_code)
         sent += len(chunk)
-    _update_sidecar(sidecar, new_offset)
+    _write_sidecar(sidecar, new_offset, repo, tokens)
     return ProcessResult("uploaded", events=sent, status_code=200)
-
-
-def _update_sidecar(path: Path, offset: int):
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(str(offset))
-    except OSError:
-        pass
 
 
 def _cleanup_old_sidecars():
