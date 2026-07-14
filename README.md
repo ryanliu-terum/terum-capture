@@ -29,7 +29,9 @@ After installing, run `terum-capture setup`, then **start a new Claude Code sess
 |---------|--------------|
 | `terum-capture setup` | Browser login → creates an API key, installs the Stop hook in `~/.claude/settings.json`, and appends a short summary instruction to `~/.claude/CLAUDE.md`. Interactive setup then offers to import your past sessions. |
 | `terum-capture backfill` | Import your **existing** Claude Code sessions (last 30 days by default) into Terum, so a fresh install isn't starting from an empty graph. Re-runnable and crash-safe — already-sent sessions are skipped. |
-| `terum-capture status` | Show your key prefix, API URL, and whether the key is still valid. |
+| `terum-capture status` | Show your key prefix, API URL, installed version, and whether the key is still valid (plus a note if a newer version is available). |
+| `terum-capture update` | Reinstall the latest CLI from GitHub and refresh the Stop hook. Run this to pick up fixes — the hook also self-heals its config daily, and `status` tells you when an update is available. |
+| `terum-capture setup-hook` | Re-write just the Stop-hook entry in `~/.claude/settings.json` (no login, no new key). Rarely needed by hand — `update` runs it for you; use it to repair hook drift. |
 | `terum-capture logout` | Remove local config and uninstall the hook. **Does not revoke the key** — revoke that from the dashboard. |
 | `terum-capture upload` | Invoked automatically by the Stop hook (reads hook input from stdin). You don't run this manually. |
 
