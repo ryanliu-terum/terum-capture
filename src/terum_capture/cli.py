@@ -6,7 +6,7 @@ def main():
 
     if not args:
         print("Usage: terum-capture <command>")
-        print("Commands: upload, setup, backfill, status, logout")
+        print("Commands: upload, setup, backfill, status, update, setup-hook, logout")
         sys.exit(1)
 
     command = args[0]
@@ -54,13 +54,21 @@ def main():
         from terum_capture.commands import cmd_status
         cmd_status()
 
+    elif command == "update":
+        from terum_capture.updater import cmd_update
+        cmd_update()
+
+    elif command == "setup-hook":
+        from terum_capture.commands import cmd_setup_hook
+        cmd_setup_hook()
+
     elif command == "logout":
         from terum_capture.commands import cmd_logout
         cmd_logout()
 
     else:
         print(f"Unknown command: {command}")
-        print("Commands: upload, setup, backfill, status, logout")
+        print("Commands: upload, setup, backfill, status, update, setup-hook, logout")
         sys.exit(1)
 
 

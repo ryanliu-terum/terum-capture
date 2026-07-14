@@ -127,6 +127,13 @@ def cmd_upload():
         _do_upload()
     except Exception as exc:
         print(f"terum-capture: upload failed: {exc}", file=sys.stderr)
+    # Once-a-day upkeep (self-heal hook config + staleness check), AFTER the upload so it
+    # can never delay or break delivery. Fully self-guarded; swallow anything it throws.
+    try:
+        from terum_capture.maintenance import run_daily_maintenance
+        run_daily_maintenance(load_config())
+    except Exception:
+        pass
     sys.exit(0)
 
 

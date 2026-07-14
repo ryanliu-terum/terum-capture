@@ -8,6 +8,7 @@ from pathlib import Path
 
 import httpx
 
+from terum_capture import __version__
 from terum_capture.config import load_config, save_config, delete_config, CallbackServer
 
 DEFAULT_API_URL = "https://api.terum.ai/api"
@@ -147,6 +148,20 @@ def cmd_setup(api_url: str | None = None, token: str | None = None):
     print("\nNo further setup needed. Start a new Claude Code session to begin capturing.")
 
     _maybe_offer_backfill(interactive=not token_supplied and sys.stdin.isatty())
+
+
+def cmd_setup_hook():
+    """Refresh ONLY the Stop-hook config to this installed package's canonical form.
+
+    Unlike ``setup``, this mints no API key and prompts for nothing — it just rewrites
+    the terum hook entry in ~/.claude/settings.json to the current command + timeout.
+    Used by ``update`` (after the reinstall) and safe to run anytime to repair hook drift.
+    """
+    _configure_hook()
+    print(
+        f"terum-capture {__version__}: Stop hook refreshed (timeout {HOOK_TIMEOUT}s). "
+        "Restart any open Claude Code sessions to load it."
+    )
 
 
 def _maybe_offer_backfill(interactive: bool):
@@ -310,9 +325,17 @@ def cmd_status():
         if resp.status_code == 200:
             data = resp.json()
             print(f"Status: connected")
+            print(f"Version: {__version__}")
             print(f"Name: {data.get('name', 'unknown')}")
             if data.get("last_used_at"):
                 print(f"Last used: {data['last_used_at']}")
+            from terum_capture.maintenance import read_update_available
+            pending = read_update_available()
+            if pending:
+                print(
+                    f"Update available: {pending} — run 'terum-capture update' "
+                    f"(you have {__version__})."
+                )
         else:
             print(f"Status: invalid or revoked (HTTP {resp.status_code})")
             sys.exit(1)
