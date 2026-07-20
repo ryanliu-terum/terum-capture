@@ -27,12 +27,22 @@ After installing, run `terum-capture setup`, then **start a new Claude Code sess
 
 | Command | What it does |
 |---------|--------------|
-| `terum-capture setup` | Browser login → creates an API key, installs the Stop hook in `~/.claude/settings.json`, and appends a short summary instruction to `~/.claude/CLAUDE.md`. |
+| `terum-capture setup` | Browser login → creates an API key, installs the Stop hook in `~/.claude/settings.json`, and appends a short summary instruction to `~/.claude/CLAUDE.md`. Also prompts to connect Claude Code's MCP to Terum (see below). |
 | `terum-capture status` | Show your key prefix, API URL, and whether the key is still valid. |
 | `terum-capture logout` | Remove local config and uninstall the hook. **Does not revoke the key** — revoke that from the dashboard. |
 | `terum-capture upload` | Invoked automatically by the Stop hook (reads hook input from stdin). You don't run this manually. |
+| `terum-capture mcp install` | Connect an already-set-up machine to Terum's MCP server (see below). Accepts `--client claude` (default) or `--client cursor`. |
 
-`setup` accepts `--url <api>` (defaults to `https://api.terum.ai/api`) and `--token <jwt>` to skip the browser for headless/CI installs.
+`setup` accepts `--url <api>` (defaults to `https://api.terum.ai/api`) and `--token <jwt>` to skip the browser for headless/CI installs. It also accepts `--mcp` (force the MCP connect prompt/install even on a non-interactive run) and `--no-mcp` (skip MCP entirely); by default it asks with a `[Y/n]` prompt when run interactively and skips silently otherwise.
+
+## Connect your agent to team knowledge (MCP)
+
+Terum runs a remote MCP server that lets your agent pull your team's shared decisions and run conflict checks — read-only, separate from the write-up capture flow above. It reuses the same `trm_` API key `setup` already mints, so there's no second sign-in.
+
+- **During `setup`:** after the hook is installed, you're asked `Also connect Claude Code to your team's shared decisions & conflict-checks (read-only)? [Y/n]`. Say yes (or just hit enter) and it's wired automatically.
+- **Later, or for Cursor:** run `terum-capture mcp install` (Claude Code) or `terum-capture mcp install --client cursor`.
+
+Both are idempotent — running them again when already connected leaves the existing config alone.
 
 ## How it works
 
