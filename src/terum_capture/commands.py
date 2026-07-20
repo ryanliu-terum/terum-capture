@@ -1,7 +1,9 @@
 import json
 import os
 import secrets
+import shutil
 import socket
+import subprocess
 import sys
 import webbrowser
 from pathlib import Path
@@ -14,6 +16,9 @@ DEFAULT_API_URL = "https://api.terum.ai/api"
 DASHBOARD_URL = "https://app.terum.ai"
 CLAUDE_SETTINGS = Path.home() / ".claude" / "settings.json"
 CLAUDE_MD = Path.home() / ".claude" / "CLAUDE.md"
+CLAUDE_JSON = Path.home() / ".claude.json"
+CURSOR_MCP = Path.home() / ".cursor" / "mcp.json"
+MCP_SERVER_NAME = "terum"
 
 HOOK_ENTRY = {
     "type": "command",
@@ -166,6 +171,77 @@ def _append_claude_md():
             f.write(CLAUDE_MD_BLOCK)
     except Exception as exc:
         print(f"Warning: Could not update CLAUDE.md: {exc}")
+
+
+def _configure_mcp(api_key: str, api_url: str, client: str = "claude") -> str:
+    """Wire an MCP server named "terum" pointing at {api_url}/mcp, authed with api_key.
+    Returns one of: "installed" | "already" | "failed". Never raises."""
+    mcp_url = f"{api_url.rstrip('/')}/mcp"
+
+    if client == "claude":
+        return _configure_mcp_claude(api_key, mcp_url)
+    if client == "cursor":
+        return _configure_mcp_cursor(api_key, mcp_url)
+
+    print(f"Error: unknown MCP client '{client}'.")
+    return "failed"
+
+
+def _configure_mcp_claude(api_key: str, mcp_url: str) -> str:
+    existing_config, parseable = _read_json_config(CLAUDE_JSON)
+    if parseable and MCP_SERVER_NAME in existing_config.get("mcpServers", {}):
+        return "already"
+
+    if shutil.which("claude"):
+        try:
+            result = subprocess.run(
+                ["claude", "mcp", "add", "--transport", "http", MCP_SERVER_NAME, mcp_url,
+                 "--header", f"Authorization: Bearer {api_key}", "--scope", "user"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if result.returncode == 0:
+                return "installed"
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+    entry = {"type": "http", "url": mcp_url, "headers": {"Authorization": f"Bearer {api_key}"}}
+    return _write_mcp_entry(CLAUDE_JSON, entry)
+
+
+def _configure_mcp_cursor(api_key: str, mcp_url: str) -> str:
+    CURSOR_MCP.parent.mkdir(parents=True, exist_ok=True)
+    entry = {"url": mcp_url, "headers": {"Authorization": f"Bearer {api_key}"}}
+    return _write_mcp_entry(CURSOR_MCP, entry)
+
+
+def _read_json_config(path: Path) -> tuple[dict, bool]:
+    """Returns (config_dict, parseable). parseable=False means the file exists but is
+    not valid JSON — callers must not overwrite it in that case."""
+    if not path.exists():
+        return {}, True
+    try:
+        return json.loads(path.read_text()), True
+    except Exception:
+        return {}, False
+
+
+def _write_mcp_entry(path: Path, entry: dict) -> str:
+    try:
+        config, parseable = _read_json_config(path)
+        if not parseable:
+            raise ValueError(f"{path} exists but is not valid JSON")
+
+        mcp_servers = config.setdefault("mcpServers", {})
+        if MCP_SERVER_NAME in mcp_servers:
+            return "already"
+
+        mcp_servers[MCP_SERVER_NAME] = entry
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(config, indent=2) + "\n")
+        return "installed"
+    except Exception as exc:
+        print(f"Warning: Could not configure MCP: {exc}")
+        return "failed"
 
 
 def _remove_hook():
