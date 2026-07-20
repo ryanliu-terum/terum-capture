@@ -154,6 +154,65 @@ class TestConfigureMcpUnknownClient:
         assert result == "failed"
 
 
+class TestConfigureMcpNullMcpServers:
+    """Regression coverage: a config file that parses as valid JSON but has a non-dict
+    `mcpServers` value (e.g. {"mcpServers": null}) must never crash `_configure_mcp`.
+    Pre-fix, `existing_config.get("mcpServers", {})` returns None (the default only
+    applies when the key is ABSENT, not when present-but-null), and `NAME in None`
+    raises TypeError. Terum should be treated as absent and installation should proceed.
+    """
+
+    def test_claude_null_mcp_servers_does_not_raise_and_installs(self, tmp_path, monkeypatch):
+        claude_json = tmp_path / ".claude.json"
+        claude_json.write_text(json.dumps({"mcpServers": None}))
+        monkeypatch.setattr(commands, "CLAUDE_JSON", claude_json)
+        monkeypatch.setattr(commands.shutil, "which", lambda name: None)
+
+        def fail_run(*a, **k):
+            raise AssertionError("subprocess.run should not be called when claude is missing")
+
+        monkeypatch.setattr(commands.subprocess, "run", fail_run)
+
+        result = _configure_mcp(API_KEY, API_URL, client="claude")
+
+        assert result == "installed"
+        data = json.loads(claude_json.read_text())
+        assert data["mcpServers"]["terum"] == {
+            "type": "http",
+            "url": f"{API_URL}/mcp",
+            "headers": {"Authorization": f"Bearer {API_KEY}"},
+        }
+
+    def test_claude_non_dict_mcp_servers_via_primary_path_does_not_raise(self, tmp_path, monkeypatch):
+        """Same bug, but hit while `claude` CLI IS present, so the idempotency check
+        (not the fallback write) is the only code that touches the null value before
+        the primary subprocess path runs."""
+        claude_json = tmp_path / ".claude.json"
+        claude_json.write_text(json.dumps({"mcpServers": "not-a-dict"}))
+        monkeypatch.setattr(commands, "CLAUDE_JSON", claude_json)
+        monkeypatch.setattr(commands.shutil, "which", lambda name: "/usr/local/bin/claude")
+        monkeypatch.setattr(commands.subprocess, "run", lambda *a, **k: FakeCompletedProcess(returncode=0))
+
+        result = _configure_mcp(API_KEY, API_URL, client="claude")
+
+        assert result == "installed"
+
+    def test_cursor_null_mcp_servers_does_not_raise_and_installs(self, tmp_path, monkeypatch):
+        cursor_mcp = tmp_path / ".cursor" / "mcp.json"
+        cursor_mcp.parent.mkdir(parents=True)
+        cursor_mcp.write_text(json.dumps({"mcpServers": None}))
+        monkeypatch.setattr(commands, "CURSOR_MCP", cursor_mcp)
+
+        result = _configure_mcp(API_KEY, API_URL, client="cursor")
+
+        assert result == "installed"
+        data = json.loads(cursor_mcp.read_text())
+        assert data["mcpServers"]["terum"] == {
+            "url": f"{API_URL}/mcp",
+            "headers": {"Authorization": f"Bearer {API_KEY}"},
+        }
+
+
 class TestConfigureMcpAdversarial:
     def test_trailing_slash_api_url_produces_sane_mcp_url(self, tmp_path, monkeypatch):
         """A naive f-string join (f"{api_url}/mcp") on an api_url with a trailing slash

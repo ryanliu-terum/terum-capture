@@ -189,7 +189,8 @@ def _configure_mcp(api_key: str, api_url: str, client: str = "claude") -> str:
 
 def _configure_mcp_claude(api_key: str, mcp_url: str) -> str:
     existing_config, parseable = _read_json_config(CLAUDE_JSON)
-    if parseable and MCP_SERVER_NAME in existing_config.get("mcpServers", {}):
+    existing_mcp_servers = existing_config.get("mcpServers")
+    if parseable and isinstance(existing_mcp_servers, dict) and MCP_SERVER_NAME in existing_mcp_servers:
         return "already"
 
     if shutil.which("claude"):
@@ -201,7 +202,7 @@ def _configure_mcp_claude(api_key: str, mcp_url: str) -> str:
             )
             if result.returncode == 0:
                 return "installed"
-        except (FileNotFoundError, subprocess.TimeoutExpired):
+        except Exception:
             pass
 
     entry = {"type": "http", "url": mcp_url, "headers": {"Authorization": f"Bearer {api_key}"}}
@@ -231,7 +232,10 @@ def _write_mcp_entry(path: Path, entry: dict) -> str:
         if not parseable:
             raise ValueError(f"{path} exists but is not valid JSON")
 
-        mcp_servers = config.setdefault("mcpServers", {})
+        mcp_servers = config.get("mcpServers")
+        if not isinstance(mcp_servers, dict):
+            mcp_servers = {}
+            config["mcpServers"] = mcp_servers
         if MCP_SERVER_NAME in mcp_servers:
             return "already"
 
