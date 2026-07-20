@@ -52,11 +52,17 @@ def main():
             client = "claude"
             i = 2
             while i < len(args):
-                if args[i] == "--client" and i + 1 < len(args):
+                if args[i] == "--client":
+                    if i + 1 >= len(args):
+                        print("Error: --client requires a value (claude|cursor).")
+                        sys.exit(1)
                     client = args[i + 1]
                     i += 2
                 else:
                     i += 1
+            if client not in ("claude", "cursor"):
+                print(f"Error: unknown MCP client '{client}'. Use claude or cursor.")
+                sys.exit(1)
             cmd_mcp_install(client)
         else:
             print("Usage: terum-capture mcp install [--client claude|cursor]")

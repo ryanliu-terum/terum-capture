@@ -215,7 +215,7 @@ def cmd_mcp_install(client: str = "claude"):
         print("Not configured. Run: terum-capture setup")
         sys.exit(1)
 
-    result = _configure_mcp(config["api_key"], config["api_url"], client=client)
+    result = _configure_mcp(config["api_key"], config.get("api_url", DEFAULT_API_URL), client=client)
 
     label = "Cursor" if client == "cursor" else "Claude Code"
     if result == "installed":
@@ -224,6 +224,7 @@ def cmd_mcp_install(client: str = "claude"):
         print(f"MCP already configured for {label} — left it as-is.")
     else:
         print(f"Could not configure MCP for {label}.")
+        sys.exit(1)
 
 
 def _configure_mcp(api_key: str, api_url: str, client: str = "claude") -> str:
@@ -263,7 +264,6 @@ def _configure_mcp_claude(api_key: str, mcp_url: str) -> str:
 
 
 def _configure_mcp_cursor(api_key: str, mcp_url: str) -> str:
-    CURSOR_MCP.parent.mkdir(parents=True, exist_ok=True)
     entry = {"url": mcp_url, "headers": {"Authorization": f"Bearer {api_key}"}}
     return _write_mcp_entry(CURSOR_MCP, entry)
 
@@ -281,6 +281,7 @@ def _read_json_config(path: Path) -> tuple[dict, bool]:
 
 def _write_mcp_entry(path: Path, entry: dict) -> str:
     try:
+        did_exist = path.exists()
         config, parseable = _read_json_config(path)
         if not parseable:
             raise ValueError(f"{path} exists but is not valid JSON")
@@ -295,6 +296,8 @@ def _write_mcp_entry(path: Path, entry: dict) -> str:
         mcp_servers[MCP_SERVER_NAME] = entry
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(config, indent=2) + "\n")
+        if not did_exist and sys.platform != "win32":
+            os.chmod(path, 0o600)
         return "installed"
     except Exception as exc:
         print(f"Warning: Could not configure MCP: {exc}")

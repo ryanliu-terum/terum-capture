@@ -65,7 +65,12 @@ class TestMaybeConfigureMcpInteractive:
         monkeypatch.setattr(commands.sys, "stdin", FakeStdin(True))
         monkeypatch.setattr(builtins, "input", lambda prompt="": "")
         called = {}
-        monkeypatch.setattr(commands, "_configure_mcp", lambda *a, **k: called.setdefault("hit", True) or "installed")
+
+        def fake_configure_mcp(*a, **k):
+            called["hit"] = True
+            return "installed"
+
+        monkeypatch.setattr(commands, "_configure_mcp", fake_configure_mcp)
 
         _maybe_configure_mcp_interactive(API_KEY, API_URL, None)
 
@@ -86,7 +91,12 @@ class TestMaybeConfigureMcpInteractive:
         monkeypatch.setattr(commands.sys, "stdin", FakeStdin(True))
         monkeypatch.setattr(builtins, "input", lambda prompt="": "  Y  ")
         called = {}
-        monkeypatch.setattr(commands, "_configure_mcp", lambda *a, **k: called.setdefault("hit", True) or "installed")
+
+        def fake_configure_mcp(*a, **k):
+            called["hit"] = True
+            return "installed"
+
+        monkeypatch.setattr(commands, "_configure_mcp", fake_configure_mcp)
 
         _maybe_configure_mcp_interactive(API_KEY, API_URL, None)
 
@@ -165,3 +175,34 @@ class TestCmdMcpInstall:
         cmd_mcp_install()
 
         assert recorded["client"] == "claude"
+
+    def test_failed_configure_mcp_exits_1(self, monkeypatch, capsys):
+        """FIX 2b: cmd_mcp_install must sys.exit(1) when _configure_mcp reports "failed",
+        so the exit-code contract holds for a write failure, not just missing config."""
+        monkeypatch.setattr(
+            commands, "load_config", lambda: {"api_key": API_KEY, "api_url": API_URL}
+        )
+        monkeypatch.setattr(commands, "_configure_mcp", lambda *a, **k: "failed")
+
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_mcp_install()
+
+        assert exc_info.value.code == 1
+        out = capsys.readouterr().out
+        assert "Could not configure MCP for Claude Code." in out
+
+    def test_missing_api_url_falls_back_to_default(self, monkeypatch):
+        """FIX 4: cmd_mcp_install must not KeyError on a config missing api_url — it
+        should fall back to DEFAULT_API_URL, matching cmd_status's config.get() pattern."""
+        monkeypatch.setattr(commands, "load_config", lambda: {"api_key": API_KEY})
+        recorded = {}
+
+        def fake_configure_mcp(api_key, api_url, client="claude"):
+            recorded["api_url"] = api_url
+            return "installed"
+
+        monkeypatch.setattr(commands, "_configure_mcp", fake_configure_mcp)
+
+        cmd_mcp_install()
+
+        assert recorded["api_url"] == commands.DEFAULT_API_URL

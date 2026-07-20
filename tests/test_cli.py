@@ -101,6 +101,44 @@ class TestMcpInstallSubcommand:
 
         assert recorded["client"] == "cursor"
 
+    def test_mcp_install_unknown_client_exits_1(self, monkeypatch, capsys):
+        called = {}
+        monkeypatch.setattr(
+            commands, "cmd_mcp_install", lambda client: called.setdefault("hit", True)
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            run_cli(monkeypatch, ["mcp", "install", "--client", "vscode"])
+
+        assert exc_info.value.code == 1
+        out = capsys.readouterr().out
+        assert "Error: unknown MCP client 'vscode'. Use claude or cursor." in out
+        assert "hit" not in called
+
+    def test_mcp_install_client_flag_missing_value_exits_1(self, monkeypatch, capsys):
+        called = {}
+        monkeypatch.setattr(
+            commands, "cmd_mcp_install", lambda client: called.setdefault("hit", True)
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            run_cli(monkeypatch, ["mcp", "install", "--client"])
+
+        assert exc_info.value.code == 1
+        out = capsys.readouterr().out
+        assert "Error: --client requires a value (claude|cursor)." in out
+        assert "hit" not in called
+
+    def test_mcp_install_client_cursor_still_dispatches(self, monkeypatch):
+        recorded = {}
+        monkeypatch.setattr(
+            commands, "cmd_mcp_install", lambda client: recorded.setdefault("client", client)
+        )
+
+        run_cli(monkeypatch, ["mcp", "install", "--client", "cursor"])
+
+        assert recorded["client"] == "cursor"
+
     def test_mcp_without_install_prints_usage_and_exits_1(self, monkeypatch, capsys):
         with pytest.raises(SystemExit) as exc_info:
             run_cli(monkeypatch, ["mcp"])

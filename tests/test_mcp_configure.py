@@ -1,5 +1,7 @@
 """Tests for the _configure_mcp helper (MCP install, Tier 3 of SPEC-mcp-install.md)."""
 import json
+import stat
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -211,6 +213,35 @@ class TestConfigureMcpNullMcpServers:
             "url": f"{API_URL}/mcp",
             "headers": {"Authorization": f"Bearer {API_KEY}"},
         }
+
+
+class TestConfigureMcpFilePermissions:
+    @pytest.mark.skipif(sys.platform == "win32", reason="chmod semantics differ on win32")
+    def test_newly_created_file_gets_mode_600(self, tmp_path, monkeypatch):
+        cursor_mcp = tmp_path / ".cursor" / "mcp.json"
+        monkeypatch.setattr(commands, "CURSOR_MCP", cursor_mcp)
+
+        result = _configure_mcp(API_KEY, API_URL, client="cursor")
+
+        assert result == "installed"
+        mode = stat.S_IMODE(cursor_mcp.stat().st_mode)
+        assert mode == 0o600
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="chmod semantics differ on win32")
+    def test_merge_into_existing_file_does_not_force_mode_600(self, tmp_path, monkeypatch):
+        cursor_mcp = tmp_path / ".cursor" / "mcp.json"
+        cursor_mcp.parent.mkdir(parents=True)
+        cursor_mcp.write_text(json.dumps({
+            "mcpServers": {"other": {"url": "https://example.com/mcp", "headers": {}}},
+        }))
+        cursor_mcp.chmod(0o644)
+        monkeypatch.setattr(commands, "CURSOR_MCP", cursor_mcp)
+
+        result = _configure_mcp(API_KEY, API_URL, client="cursor")
+
+        assert result == "installed"
+        mode = stat.S_IMODE(cursor_mcp.stat().st_mode)
+        assert mode == 0o644
 
 
 class TestConfigureMcpAdversarial:
