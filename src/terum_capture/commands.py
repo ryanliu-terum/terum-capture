@@ -1,7 +1,9 @@
 import json
 import os
 import secrets
+import shutil
 import socket
+import subprocess
 import sys
 import webbrowser
 from pathlib import Path
@@ -15,6 +17,9 @@ DEFAULT_API_URL = "https://api.terum.ai/api"
 DASHBOARD_URL = "https://app.terum.ai"
 CLAUDE_SETTINGS = Path.home() / ".claude" / "settings.json"
 CLAUDE_MD = Path.home() / ".claude" / "CLAUDE.md"
+CLAUDE_JSON = Path.home() / ".claude.json"
+CURSOR_MCP = Path.home() / ".cursor" / "mcp.json"
+MCP_SERVER_NAME = "terum"
 
 # 60s (not Claude Code's 15s default): a big session's first upload does a
 # whole-file read + git before the POST; 15s could kill it mid-work, and a
@@ -68,7 +73,7 @@ makes the captured data richer.
 """
 
 
-def cmd_setup(api_url: str | None = None, token: str | None = None):
+def cmd_setup(api_url: str | None = None, token: str | None = None, mcp: bool | None = None):
     api_url = api_url or DEFAULT_API_URL
     # Whether a token was passed non-interactively (--token). Captured before
     # _browser_auth reassigns `token`, so the backfill auto-prompt can stay TTY-gated.
@@ -140,6 +145,8 @@ def cmd_setup(api_url: str | None = None, token: str | None = None):
 
     _configure_hook()
     _append_claude_md()
+
+    _maybe_configure_mcp_interactive(api_key, api_url, mcp)
 
     prefix = api_key[:8]
     print(f"\nTerum connected! Key: {prefix}...")
@@ -285,6 +292,135 @@ def _append_claude_md():
             f.write(CLAUDE_MD_BLOCK)
     except Exception as exc:
         print(f"Warning: Could not update CLAUDE.md: {exc}")
+
+
+def _maybe_configure_mcp_interactive(api_key: str, api_url: str, choice: bool | None) -> None:
+    """Tier 1: the opt-in MCP prompt at the end of `cmd_setup`.
+
+    `choice` is a tri-state (wired in from CLI flags, see cli.py):
+      None  -> interactive: ask only if running on a TTY, skip silently otherwise.
+      True  -> forced yes (headless opt-in via --mcp): install without prompting.
+      False -> forced skip: do nothing.
+    Never raises — a headless EOFError/KeyboardInterrupt on input() is treated as skip.
+    """
+    if choice is False:
+        return
+
+    if choice is None:
+        if not sys.stdin.isatty():
+            return
+        try:
+            answer = input(
+                "Also connect Claude Code to your team's shared decisions & "
+                "conflict-checks (read-only)? [Y/n] "
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return
+        if answer in ("n", "no"):
+            return
+
+    result = _configure_mcp(api_key, api_url, client="claude")
+    if result == "installed":
+        print("MCP connected — your agent can now pull team decisions & run conflict checks.")
+    elif result == "already":
+        print("MCP already configured — left it as-is.")
+    else:
+        print("Could not auto-configure MCP. Run 'terum-capture mcp install' later.")
+
+
+def cmd_mcp_install(client: str = "claude"):
+    config = load_config()
+    if not config or not config.get("api_key"):
+        print("Not configured. Run: terum-capture setup")
+        sys.exit(1)
+
+    result = _configure_mcp(config["api_key"], config.get("api_url", DEFAULT_API_URL), client=client)
+
+    label = "Cursor" if client == "cursor" else "Claude Code"
+    if result == "installed":
+        print(f"MCP connected for {label}.")
+    elif result == "already":
+        print(f"MCP already configured for {label} — left it as-is.")
+    else:
+        print(f"Could not configure MCP for {label}.")
+        sys.exit(1)
+
+
+def _configure_mcp(api_key: str, api_url: str, client: str = "claude") -> str:
+    """Wire an MCP server named "terum" pointing at {api_url}/mcp, authed with api_key.
+    Returns one of: "installed" | "already" | "failed". Never raises."""
+    mcp_url = f"{api_url.rstrip('/')}/mcp"
+
+    if client == "claude":
+        return _configure_mcp_claude(api_key, mcp_url)
+    if client == "cursor":
+        return _configure_mcp_cursor(api_key, mcp_url)
+
+    print(f"Error: unknown MCP client '{client}'.")
+    return "failed"
+
+
+def _configure_mcp_claude(api_key: str, mcp_url: str) -> str:
+    existing_config, parseable = _read_json_config(CLAUDE_JSON)
+    existing_mcp_servers = existing_config.get("mcpServers") if isinstance(existing_config, dict) else None
+    if parseable and isinstance(existing_mcp_servers, dict) and MCP_SERVER_NAME in existing_mcp_servers:
+        return "already"
+
+    if shutil.which("claude"):
+        try:
+            result = subprocess.run(
+                ["claude", "mcp", "add", "--transport", "http", MCP_SERVER_NAME, mcp_url,
+                 "--header", f"Authorization: Bearer {api_key}", "--scope", "user"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if result.returncode == 0:
+                return "installed"
+        except Exception:
+            pass
+
+    entry = {"type": "http", "url": mcp_url, "headers": {"Authorization": f"Bearer {api_key}"}}
+    return _write_mcp_entry(CLAUDE_JSON, entry)
+
+
+def _configure_mcp_cursor(api_key: str, mcp_url: str) -> str:
+    entry = {"url": mcp_url, "headers": {"Authorization": f"Bearer {api_key}"}}
+    return _write_mcp_entry(CURSOR_MCP, entry)
+
+
+def _read_json_config(path: Path) -> tuple[dict, bool]:
+    """Returns (config_dict, parseable). parseable=False means the file exists but is
+    not valid JSON — callers must not overwrite it in that case."""
+    if not path.exists():
+        return {}, True
+    try:
+        return json.loads(path.read_text()), True
+    except Exception:
+        return {}, False
+
+
+def _write_mcp_entry(path: Path, entry: dict) -> str:
+    try:
+        did_exist = path.exists()
+        config, parseable = _read_json_config(path)
+        if not parseable:
+            raise ValueError(f"{path} exists but is not valid JSON")
+
+        mcp_servers = config.get("mcpServers")
+        if not isinstance(mcp_servers, dict):
+            mcp_servers = {}
+            config["mcpServers"] = mcp_servers
+        if MCP_SERVER_NAME in mcp_servers:
+            return "already"
+
+        mcp_servers[MCP_SERVER_NAME] = entry
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(config, indent=2) + "\n")
+        if not did_exist and sys.platform != "win32":
+            os.chmod(path, 0o600)
+        return "installed"
+    except Exception as exc:
+        print(f"Warning: Could not configure MCP: {exc}")
+        return "failed"
 
 
 def _remove_hook():
