@@ -40,7 +40,7 @@ makes the captured data richer.
 """
 
 
-def cmd_setup(api_url: str | None = None, token: str | None = None):
+def cmd_setup(api_url: str | None = None, token: str | None = None, mcp: bool | None = None):
     api_url = api_url or DEFAULT_API_URL
 
     config = load_config()
@@ -110,6 +110,8 @@ def cmd_setup(api_url: str | None = None, token: str | None = None):
     _configure_hook()
     _append_claude_md()
 
+    _maybe_configure_mcp_interactive(api_key, api_url, mcp)
+
     prefix = api_key[:8]
     print(f"\nTerum connected! Key: {prefix}...")
     print("\nClaude Code hook configured — your sessions will be captured automatically.")
@@ -171,6 +173,57 @@ def _append_claude_md():
             f.write(CLAUDE_MD_BLOCK)
     except Exception as exc:
         print(f"Warning: Could not update CLAUDE.md: {exc}")
+
+
+def _maybe_configure_mcp_interactive(api_key: str, api_url: str, choice: bool | None) -> None:
+    """Tier 1: the opt-in MCP prompt at the end of `cmd_setup`.
+
+    `choice` is a tri-state (wired in from CLI flags, see cli.py):
+      None  -> interactive: ask only if running on a TTY, skip silently otherwise.
+      True  -> forced yes (headless opt-in via --mcp): install without prompting.
+      False -> forced skip: do nothing.
+    Never raises — a headless EOFError/KeyboardInterrupt on input() is treated as skip.
+    """
+    if choice is False:
+        return
+
+    if choice is None:
+        if not sys.stdin.isatty():
+            return
+        try:
+            answer = input(
+                "Also connect Claude Code to your team's shared decisions & "
+                "conflict-checks (read-only)? [Y/n] "
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return
+        if answer in ("n", "no"):
+            return
+
+    result = _configure_mcp(api_key, api_url, client="claude")
+    if result == "installed":
+        print("MCP connected — your agent can now pull team decisions & run conflict checks.")
+    elif result == "already":
+        print("MCP already configured — left it as-is.")
+    else:
+        print("Could not auto-configure MCP. Run 'terum-capture mcp install' later.")
+
+
+def cmd_mcp_install(client: str = "claude"):
+    config = load_config()
+    if not config or not config.get("api_key"):
+        print("Not configured. Run: terum-capture setup")
+        sys.exit(1)
+
+    result = _configure_mcp(config["api_key"], config["api_url"], client=client)
+
+    label = "Cursor" if client == "cursor" else "Claude Code"
+    if result == "installed":
+        print(f"MCP connected for {label}.")
+    elif result == "already":
+        print(f"MCP already configured for {label} — left it as-is.")
+    else:
+        print(f"Could not configure MCP for {label}.")
 
 
 def _configure_mcp(api_key: str, api_url: str, client: str = "claude") -> str:
