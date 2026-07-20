@@ -66,6 +66,11 @@ class _CallbackHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", CORS_ORIGIN)
         self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        # The dashboard (https://app.terum.ai, a public secure origin) POSTs to this
+        # loopback server, which Chrome's Private Network Access gates: the preflight
+        # is rejected unless the response opts in with this header. Without it the
+        # handshake breaks once Chrome enforces PNA for public->localhost requests.
+        self.send_header("Access-Control-Allow-Private-Network", "true")
 
     def log_message(self, format, *args):
         pass

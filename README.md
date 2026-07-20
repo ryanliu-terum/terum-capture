@@ -27,13 +27,18 @@ After installing, run `terum-capture setup`, then **start a new Claude Code sess
 
 | Command | What it does |
 |---------|--------------|
-| `terum-capture setup` | Browser login → creates an API key, installs the Stop hook in `~/.claude/settings.json`, and appends a short summary instruction to `~/.claude/CLAUDE.md`. Also prompts to connect Claude Code's MCP to Terum (see below). |
-| `terum-capture status` | Show your key prefix, API URL, and whether the key is still valid. |
+| `terum-capture setup` | Browser login → creates an API key, installs the Stop hook in `~/.claude/settings.json`, and appends a short summary instruction to `~/.claude/CLAUDE.md`. Interactive setup then offers to import your past sessions, and to connect Claude Code's MCP to Terum (see below). |
+| `terum-capture backfill` | Import your **existing** Claude Code sessions (last 30 days by default) into Terum, so a fresh install isn't starting from an empty graph. Re-runnable and crash-safe — already-sent sessions are skipped. |
+| `terum-capture status` | Show your key prefix, API URL, installed version, and whether the key is still valid (plus a note if a newer version is available). |
+| `terum-capture update` | Reinstall the latest CLI from GitHub and refresh the Stop hook. Run this to pick up fixes — the hook also self-heals its config daily, and `status` tells you when an update is available. |
+| `terum-capture setup-hook` | Re-write just the Stop-hook entry in `~/.claude/settings.json` (no login, no new key). Rarely needed by hand — `update` runs it for you; use it to repair hook drift. |
 | `terum-capture logout` | Remove local config and uninstall the hook. **Does not revoke the key** — revoke that from the dashboard. |
 | `terum-capture upload` | Invoked automatically by the Stop hook (reads hook input from stdin). You don't run this manually. |
 | `terum-capture mcp install` | Connect an already-set-up machine to Terum's MCP server (see below). Accepts `--client claude` (default) or `--client cursor`. |
 
-`setup` accepts `--url <api>` (defaults to `https://api.terum.ai/api`) and `--token <jwt>` to skip the browser for headless/CI installs. It also accepts `--mcp` (install MCP directly without prompting, even on a non-interactive run) and `--no-mcp` (skip MCP entirely); by default it asks with a `[Y/n]` prompt when run interactively and skips silently otherwise.
+`setup` accepts `--url <api>` (defaults to `https://api.terum.ai/api`) and `--token <jwt>` to skip the browser for headless/CI installs (non-interactive setup skips the backfill and MCP prompts). It also accepts `--mcp` (install MCP directly without prompting, even on a non-interactive run) and `--no-mcp` (skip MCP entirely); by default it asks with a `[Y/n]` prompt when run interactively and skips silently otherwise.
+
+`backfill` accepts `--days N` (window, default 30), `--all` (no time window — import everything), and `--limit N` (cap the number of sessions). It discovers transcripts under `~/.claude/projects/`, paces uploads under the server rate limit, backs off on throttling, and reports how many were imported vs. already captured. Uploaded sessions finish processing server-side asynchronously over the next day or so.
 
 ## Connect your agent to team knowledge (MCP)
 
@@ -46,7 +51,7 @@ Both are idempotent — running them again when already connected leaves the exi
 
 ## How it works
 
-- **Hook:** `setup` adds `{"type": "command", "command": "terum-capture upload", "timeout": 15}` to the `Stop` hooks in `~/.claude/settings.json`.
+- **Hook:** `setup` adds a `Stop` hook to `~/.claude/settings.json` that runs `"<python>" -m terum_capture upload` — routed through the signed Python interpreter (`sys.executable`) rather than the `terum-capture` console-script shim, because Windows Smart App Control / WDAC block unsigned pip/pipx `.exe` launchers on enforcing machines (which silently killed capture every session). `setup` migrates any older hook entry to this form; `logout` removes either.
 - **Incremental upload:** an offset sidecar at `~/.terum/sent_<session_id>` tracks how much of each transcript has been sent, so only new turns are uploaded. Sidecars older than 7 days are cleaned up automatically.
 - **What's captured:** your prompts and Claude's **text** responses (thinking blocks, tool calls, and tool results are stripped), the conversation title, the working directory, and session-level token usage. Trivial turns (< 10 chars) are dropped.
 - **Config:** your API key lives in `~/.terum/config.json` (created `chmod 600`).

@@ -163,7 +163,7 @@ class TestUsageBanners:
 
         assert exc_info.value.code == 1
         out = capsys.readouterr().out
-        assert "Commands: upload, setup, status, logout, mcp" in out
+        assert "Commands: upload, setup, backfill, status, update, setup-hook, logout, mcp" in out
 
     def test_unknown_command_lists_mcp_in_commands(self, monkeypatch, capsys):
         with pytest.raises(SystemExit) as exc_info:
@@ -172,7 +172,7 @@ class TestUsageBanners:
         assert exc_info.value.code == 1
         out = capsys.readouterr().out
         assert "Unknown command: bogus" in out
-        assert "Commands: upload, setup, status, logout, mcp" in out
+        assert "Commands: upload, setup, backfill, status, update, setup-hook, logout, mcp" in out
 
 
 class TestExistingCommandsUnaffected:

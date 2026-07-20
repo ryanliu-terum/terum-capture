@@ -215,6 +215,42 @@ class TestConfigureMcpNullMcpServers:
         }
 
 
+class TestConfigureMcpNonDictRoot:
+    """Regression coverage: a config file that parses as valid JSON but whose ROOT is
+    not an object (e.g. `[]`, `null`, a bare string) must never crash `_configure_mcp`.
+    Pre-fix, `_configure_mcp_claude`'s idempotency pre-check called
+    `existing_config.get("mcpServers")` on that non-dict root with no guard, raising
+    AttributeError and taking down `setup` / `mcp install` after the key was saved.
+    """
+
+    def test_claude_non_dict_root_via_primary_path_does_not_raise(self, tmp_path, monkeypatch):
+        # `claude` CLI present, so the idempotency pre-check is the only code that touches
+        # the non-dict root before the primary subprocess path runs — the exact line that
+        # crashed pre-fix.
+        claude_json = tmp_path / ".claude.json"
+        claude_json.write_text(json.dumps([]))
+        monkeypatch.setattr(commands, "CLAUDE_JSON", claude_json)
+        monkeypatch.setattr(commands.shutil, "which", lambda name: "/usr/local/bin/claude")
+        monkeypatch.setattr(commands.subprocess, "run", lambda *a, **k: FakeCompletedProcess(returncode=0))
+
+        result = _configure_mcp(API_KEY, API_URL, client="claude")
+
+        assert result == "installed"
+
+    def test_claude_non_dict_root_fallback_warns_and_leaves_file_untouched(self, tmp_path, monkeypatch):
+        # No `claude` CLI, so it falls through to the direct-write path, which must warn and
+        # return "failed" (never crash) and must not clobber the odd-but-valid file.
+        claude_json = tmp_path / ".claude.json"
+        claude_json.write_text(json.dumps([]))
+        monkeypatch.setattr(commands, "CLAUDE_JSON", claude_json)
+        monkeypatch.setattr(commands.shutil, "which", lambda name: None)
+
+        result = _configure_mcp(API_KEY, API_URL, client="claude")
+
+        assert result == "failed"
+        assert json.loads(claude_json.read_text()) == []
+
+
 class TestConfigureMcpFilePermissions:
     @pytest.mark.skipif(sys.platform == "win32", reason="chmod semantics differ on win32")
     def test_newly_created_file_gets_mode_600(self, tmp_path, monkeypatch):

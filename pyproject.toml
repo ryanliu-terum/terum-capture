@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "terum-capture"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Capture Claude Code sessions into Terum's knowledge pipeline"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -30,6 +30,9 @@ Repository = "https://github.com/ryanliu-terum/terum-capture"
 
 [project.scripts]
 terum-capture = "terum_capture.cli:main"
+
+[tool.hatch.version]
+path = "src/terum_capture/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/terum_capture"]
