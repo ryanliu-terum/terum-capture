@@ -72,6 +72,35 @@ If you forget the summary, the conversation is still captured; the summary just
 makes the captured data richer.
 """
 
+# Idempotency key for the MCP-usage guidance below. Delivery through the Terum MCP server is
+# PULL-ONLY — nothing is injected automatically, so the tools only help if the agent actually
+# reaches for them. Without this instruction the model rarely calls an optional MCP tool, so
+# "in-flow team context" silently never fires. Appended only when MCP is actually wired for
+# Claude Code (see _configure_mcp call sites); Cursor has no ~/.claude/CLAUDE.md.
+MCP_USAGE_HEADER = "## Terum Team Knowledge (MCP)"
+
+MCP_USAGE_BLOCK = """
+## Terum Team Knowledge (MCP)
+
+Your team's shared knowledge and standing decisions are reachable through the Terum MCP
+server, via three tools: `search_team_knowledge`, `check_decision`, `get_standing_decisions`.
+Delivery is pull-only — nothing is injected automatically, so these only help the team if you
+actually call them at the right moments:
+
+- Before proposing or making a non-trivial technical decision — an architecture choice, a
+  library / API / schema / auth decision, or a destructive or hard-to-reverse action — call
+  `check_decision` with the specific action you're about to take. It surfaces conflicts with
+  the team's standing decisions and is silent when nothing conflicts.
+- When you start work in an unfamiliar area, or before answering a question that assumes team
+  context, call `search_team_knowledge` first to find what the team already decided or discussed.
+- Call `get_standing_decisions` to catch up on the team's recent decisions before proposing
+  something new.
+
+This is separate from Terum's automatic session capture, which needs no tool calls: capture
+records your work for the team, while these knowledge tools are yours to call to pull the
+team's context into your work.
+"""
+
 
 def cmd_setup(api_url: str | None = None, token: str | None = None, mcp: bool | None = None):
     api_url = api_url or DEFAULT_API_URL
@@ -294,6 +323,27 @@ def _append_claude_md():
         print(f"Warning: Could not update CLAUDE.md: {exc}")
 
 
+def _append_mcp_usage_claude_md():
+    """Append MCP-usage guidance to ~/.claude/CLAUDE.md so the agent knows WHEN to call the
+    Terum MCP tools. Idempotent (keyed on MCP_USAGE_HEADER), append-only, and warn-don't-crash —
+    mirrors _append_claude_md exactly. Claude Code only; called after MCP is wired for `claude`."""
+    try:
+        CLAUDE_MD.parent.mkdir(parents=True, exist_ok=True)
+        existing = ""
+        if CLAUDE_MD.exists():
+            existing = CLAUDE_MD.read_text()
+
+        if MCP_USAGE_HEADER in existing:
+            return
+
+        with open(CLAUDE_MD, "a") as f:
+            if existing and not existing.endswith("\n"):
+                f.write("\n")
+            f.write(MCP_USAGE_BLOCK)
+    except Exception as exc:
+        print(f"Warning: Could not update CLAUDE.md with MCP guidance: {exc}")
+
+
 def _maybe_configure_mcp_interactive(api_key: str, api_url: str, choice: bool | None) -> None:
     """Tier 1: the opt-in MCP prompt at the end of `cmd_setup`.
 
@@ -321,8 +371,10 @@ def _maybe_configure_mcp_interactive(api_key: str, api_url: str, choice: bool | 
 
     result = _configure_mcp(api_key, api_url, client="claude")
     if result == "installed":
+        _append_mcp_usage_claude_md()
         print("MCP connected — your agent can now pull team decisions & run conflict checks.")
     elif result == "already":
+        _append_mcp_usage_claude_md()
         print("MCP already configured — left it as-is.")
     else:
         print("Could not auto-configure MCP. Run 'terum-capture mcp install' later.")
@@ -337,6 +389,9 @@ def cmd_mcp_install(client: str = "claude"):
     result = _configure_mcp(config["api_key"], config.get("api_url", DEFAULT_API_URL), client=client)
 
     label = "Cursor" if client == "cursor" else "Claude Code"
+    # The usage guidance lives in ~/.claude/CLAUDE.md — Claude Code only (Cursor has no such file).
+    if client == "claude" and result in ("installed", "already"):
+        _append_mcp_usage_claude_md()
     if result == "installed":
         print(f"MCP connected for {label}.")
     elif result == "already":
