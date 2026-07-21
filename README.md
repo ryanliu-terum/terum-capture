@@ -49,6 +49,8 @@ Terum runs a remote MCP server that lets your agent pull your team's shared deci
 
 Both are idempotent — running them again when already connected leaves the existing config alone.
 
+When MCP is wired for Claude Code, a short **"Terum Team Knowledge (MCP)"** block is also appended to `~/.claude/CLAUDE.md` telling the agent *when* to call the three tools (`search_team_knowledge`, `check_decision`, `get_standing_decisions`). Delivery is pull-only — nothing is injected automatically — so without this nudge the agent rarely reaches for the tools and team context silently never surfaces. The block is idempotent (added once) and never written for Cursor.
+
 ## How it works
 
 - **Hook:** `setup` adds a `Stop` hook to `~/.claude/settings.json` that runs `"<python>" -m terum_capture upload` — routed through the signed Python interpreter (`sys.executable`) rather than the `terum-capture` console-script shim, because Windows Smart App Control / WDAC block unsigned pip/pipx `.exe` launchers on enforcing machines (which silently killed capture every session). `setup` migrates any older hook entry to this form; `logout` removes either.
