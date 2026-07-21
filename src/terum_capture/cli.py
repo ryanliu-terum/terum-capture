@@ -6,7 +6,7 @@ def main():
 
     if not args:
         print("Usage: terum-capture <command>")
-        print("Commands: upload, setup, backfill, status, update, setup-hook, logout, mcp")
+        print("Commands: upload, setup, backfill, status, update, setup-hook, logout, mcp, delivery")
         sys.exit(1)
 
     command = args[0]
@@ -73,6 +73,23 @@ def main():
         from terum_capture.commands import cmd_logout
         cmd_logout()
 
+    elif command == "delivery-hook":
+        # Invoked by the Claude Code hooks themselves (reads the hook payload from stdin), like
+        # `upload`. Not run by hand. `delivery-hook prompt` = UserPromptSubmit, `pretooluse` = PreToolUse.
+        from terum_capture.delivery_hooks import run_prompt_hook, run_pretooluse_hook
+        event = args[1] if len(args) >= 2 else ""
+        if event == "prompt":
+            run_prompt_hook()
+        elif event == "pretooluse":
+            run_pretooluse_hook()
+        else:
+            print("Usage: terum-capture delivery-hook <prompt|pretooluse>")
+            sys.exit(1)
+
+    elif command == "delivery":
+        from terum_capture.delivery_hooks import cmd_delivery
+        cmd_delivery(args[1] if len(args) >= 2 else "")
+
     elif command == "mcp":
         if len(args) >= 2 and args[1] == "install":
             from terum_capture.commands import cmd_mcp_install
@@ -97,7 +114,7 @@ def main():
 
     else:
         print(f"Unknown command: {command}")
-        print("Commands: upload, setup, backfill, status, update, setup-hook, logout, mcp")
+        print("Commands: upload, setup, backfill, status, update, setup-hook, logout, mcp, delivery")
         sys.exit(1)
 
 
