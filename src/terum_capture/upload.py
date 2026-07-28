@@ -281,6 +281,16 @@ def process_transcript(
 
     title, turns = _parse_turns(entries)
 
+    # Blind-spot digest (2026-07-28 study): fold the dropped tool activity — edited
+    # file paths + is_error Bash failures — into one bounded response-only turn.
+    # Appended AFTER the prose turns with a +1s-bumped timestamp so it sorts last
+    # within this chunk and cannot collide on the server dedup key. Applies to both
+    # live and backfill uploads (this is the shared parsing brain).
+    digest = _extract_activity_digest(entries)
+    if digest is not None:
+        digest_text, digest_ts = digest
+        turns.append(("", digest_text, _bump_timestamp(digest_ts)))
+
     if not turns:
         # Bytes consumed, nothing to send — advance the confirmed offset and persist
         # the token baseline so later incremental uploads stay cheap and correct;
@@ -417,6 +427,102 @@ def _parse_turns(entries: list) -> tuple[str | None, list[tuple[str, str, str | 
 
     turns = [(p, r, t) for p, r, t in turns if len(p) + len(r) >= 10]
     return title, turns
+
+
+DIGEST_MAX_FILES = 20
+DIGEST_MAX_FAILURES = 8
+DIGEST_MAX_CHARS = 1200
+_EDIT_TOOLS = {"Edit", "Write", "NotebookEdit", "MultiEdit"}
+# Two tiers: an informative error line beats a bare exit-code line, which beats the first line.
+_ERROR_LINE_RE = re.compile(r"^.*(?:error|Error|FAIL|Traceback|fatal|panic|exception|Exception).*$", re.MULTILINE)
+_EXIT_CODE_LINE_RE = re.compile(r"^.*Exit code [1-9].*$", re.MULTILINE)
+
+
+def _extract_activity_digest(entries: list) -> tuple[str, str | None] | None:
+    """Distill the tool activity _parse_turns drops into ONE bounded synthetic turn.
+
+    The 2026-07-28 capture blind-spot study (9 transcript↔note pairs) found the
+    prose-only capture loses two knowledge classes: which files were actually
+    edited (half never reach the note) and what failed along the way (a
+    `worktree remove → Directory not empty` lesson reached neither prose nor
+    note). This captures exactly those two classes and nothing else — no tool
+    results wholesale, no thinking — as a mechanical, hard-capped digest:
+    Edit/Write file paths + Bash commands whose tool_result came back
+    ``is_error`` (strict flag only; content pattern-matching over-flags greps
+    whose OUTPUT merely contains the word "error").
+
+    Returns (digest_text, last_activity_timestamp) or None when the chunk had
+    no qualifying activity. The caller appends it as a response-only turn so it
+    rides the existing event shape, server dedup, and the distill-side secret
+    scrub unchanged.
+    """
+    edited: list[str] = []
+    seen_files: set[str] = set()
+    failures: list[str] = []
+    tool_use_by_id: dict[str, dict] = {}
+    last_ts: str | None = None
+
+    for entry in entries:
+        ts = entry.get("timestamp")
+        if ts:
+            last_ts = ts
+        content = entry.get("message", {}).get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use":
+                tool_use_by_id[block.get("id")] = block
+                name = block.get("name")
+                inp = block.get("input") or {}
+                if name in _EDIT_TOOLS and inp.get("file_path"):
+                    # keep the tail of the path — repo-relative identity without machine prefixes
+                    tail = "/".join(str(inp["file_path"]).replace("\\", "/").split("/")[-3:])
+                    if tail not in seen_files:
+                        seen_files.add(tail)
+                        edited.append(tail)
+            elif block.get("type") == "tool_result" and block.get("is_error"):
+                src = tool_use_by_id.get(block.get("tool_use_id"))
+                if not src or src.get("name") != "Bash":
+                    continue
+                cmd = str((src.get("input") or {}).get("command", "")).split("\n")[0][:60]
+                raw = block.get("content")
+                text = raw if isinstance(raw, str) else "\n".join(
+                    c.get("text", "") for c in raw if isinstance(c, dict)
+                ) if isinstance(raw, list) else ""
+                m = _ERROR_LINE_RE.search(text) or _EXIT_CODE_LINE_RE.search(text)
+                err = (m.group(0) if m else text.strip().split("\n")[0]).strip()[:160]
+                if cmd and err and len(failures) < DIGEST_MAX_FAILURES * 2:
+                    failures.append(f"`{cmd}` → {err}")
+
+    if not edited and not failures:
+        return None
+
+    parts = ["[Session activity digest — auto-captured]"]
+    if edited:
+        shown = edited[:DIGEST_MAX_FILES]
+        extra = f" (+{len(edited) - len(shown)} more)" if len(edited) > len(shown) else ""
+        parts.append("Edited: " + ", ".join(shown) + extra)
+    if failures:
+        parts.append("Failed commands:")
+        parts.extend(f"- {f}" for f in failures[:DIGEST_MAX_FAILURES])
+    text = "\n".join(parts)[:DIGEST_MAX_CHARS]
+    return text, last_ts
+
+
+def _bump_timestamp(ts: str | None) -> str | None:
+    """Return ts advanced by one second so the digest turn can never collide with a
+    real turn on the server dedup key (user+site+conversation+captured_at)."""
+    if not ts:
+        return None
+    try:
+        from datetime import datetime, timedelta
+
+        parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        return (parsed + timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%S.") + f"{parsed.microsecond // 1000:03d}Z"
+    except ValueError:
+        return ts
 
 
 def _build_events(turns, session_id, title, cwd, repo, tokens) -> list[dict]:
