@@ -119,6 +119,14 @@ class TestFormatContext:
         assert "- rate limiting" in out
         assert "(" not in out.splitlines()[-1]
 
+    def test_multiline_summary_flattened_to_one_bullet_line(self):
+        # Prod summaries are multi-line markdown; a bullet spanning lines breaks the strip
+        # guard's block scan (found live, 2026-07-29 E2E). Every bullet must be ONE line.
+        out = _format_context({"results": [{"summary": "**Topic**: nav\n\n**Summary**: article style\n- sub", "owner": "Teddy"}]})
+        bullets = [l for l in out.splitlines()[1:]]
+        assert len(bullets) == 1
+        assert bullets[0].startswith("- ") and "article style" in bullets[0] and "(Teddy)" in bullets[0]
+
     def test_empty_is_none(self):
         assert _format_context({"results": []}) is None
         assert _format_context(None) is None

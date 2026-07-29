@@ -125,7 +125,10 @@ def _format_context(output: dict | None) -> str | None:
     for item in (output.get("results") or [])[:_MAX_ITEMS]:
         if not isinstance(item, dict):
             continue
-        text = str(item.get("summary") or item.get("topic") or "").strip()
+        # Flatten to ONE line: prod summaries are multi-line markdown, and a bullet spanning
+        # lines both garbles the block and breaks upload.py's strip (its block-scan ends at the
+        # first non-"- " line). Found live in the 2026-07-29 E2E probe.
+        text = " ".join(str(item.get("summary") or item.get("topic") or "").split())
         if not text:
             continue
         owner = str(item.get("owner") or "").strip()
