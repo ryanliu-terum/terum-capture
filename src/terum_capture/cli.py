@@ -39,6 +39,7 @@ def main():
         url = None
         token = None
         mcp = None
+        delivery = None
         i = 1
         while i < len(args):
             if args[i] == "--url" and i + 1 < len(args):
@@ -53,9 +54,15 @@ def main():
             elif args[i] == "--no-mcp":
                 mcp = False
                 i += 1
+            elif args[i] == "--delivery":
+                delivery = True
+                i += 1
+            elif args[i] == "--no-delivery":
+                delivery = False
+                i += 1
             else:
                 i += 1
-        cmd_setup(api_url=url, token=token, mcp=mcp)
+        cmd_setup(api_url=url, token=token, mcp=mcp, delivery=delivery)
 
     elif command == "status":
         from terum_capture.commands import cmd_status
