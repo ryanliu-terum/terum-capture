@@ -74,16 +74,14 @@ def main():
         cmd_logout()
 
     elif command == "delivery-hook":
-        # Invoked by the Claude Code hooks themselves (reads the hook payload from stdin), like
-        # `upload`. Not run by hand. `delivery-hook prompt` = UserPromptSubmit, `pretooluse` = PreToolUse.
-        from terum_capture.delivery_hooks import run_prompt_hook, run_pretooluse_hook
+        # Invoked by the Claude Code hook itself (reads the hook payload from stdin), like
+        # `upload`. Not run by hand. `delivery-hook prompt` = UserPromptSubmit.
+        from terum_capture.delivery_hooks import run_prompt_hook
         event = args[1] if len(args) >= 2 else ""
         if event == "prompt":
             run_prompt_hook()
-        elif event == "pretooluse":
-            run_pretooluse_hook()
         else:
-            print("Usage: terum-capture delivery-hook <prompt|pretooluse>")
+            print("Usage: terum-capture delivery-hook prompt")
             sys.exit(1)
 
     elif command == "delivery":

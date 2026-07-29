@@ -10,6 +10,7 @@ from pathlib import Path
 import httpx
 
 from terum_capture.config import load_config
+from terum_capture.delivery_hooks import CONTEXT_MARKER, REMINDER_MARKER
 
 TERUM_DIR = Path.home() / ".terum"
 MAX_EVENTS_PER_BATCH = 50
@@ -367,6 +368,37 @@ def _read_entries(transcript_path: str, last_offset: int) -> list:
     return entries
 
 
+def _strip_delivery_injection(text: str) -> str:
+    """Echo-loop guard: remove delivery-hook-injected [Terum ...] blocks from a captured prompt.
+
+    The delivery hook (delivery_hooks.py) prepends team context to the session via
+    additionalContext; if that text lands inside the captured user prompt, uploading it would
+    re-distill the TEAM's knowledge as if this user decided it (wrong attribution, duplicate
+    corpus rows). Every injected line starts with one of the two markers, so the strip is
+    mechanical: drop a CONTEXT_MARKER line plus its immediately following "- " bullets, and
+    drop any REMINDER_MARKER line. Text without markers passes through untouched.
+    """
+    if CONTEXT_MARKER not in text and REMINDER_MARKER not in text:
+        return text
+    kept: list[str] = []
+    in_context_block = False
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith(CONTEXT_MARKER):
+            in_context_block = True
+            continue
+        if stripped.startswith(REMINDER_MARKER):
+            continue
+        if in_context_block:
+            if stripped.startswith("- "):
+                continue
+            in_context_block = False
+            if not stripped:
+                continue  # swallow the blank separator that trailed the injected block
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def _parse_turns(entries: list) -> tuple[str | None, list[tuple[str, str, str | None]]]:
     """Pair user/assistant entries into (prompt, response, timestamp) turns.
 
@@ -393,6 +425,7 @@ def _parse_turns(entries: list) -> tuple[str | None, list[tuple[str, str, str | 
                 continue
             if not isinstance(content, str) or content.startswith("<"):
                 continue
+            content = _strip_delivery_injection(content)
             if len(content.strip()) < 3:
                 continue
             if current_prompt is not None:

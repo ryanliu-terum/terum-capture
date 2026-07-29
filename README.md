@@ -35,6 +35,7 @@ After installing, run `terum-capture setup`, then **start a new Claude Code sess
 | `terum-capture logout` | Remove local config and uninstall the hook. **Does not revoke the key** — revoke that from the dashboard. |
 | `terum-capture upload` | Invoked automatically by the Stop hook (reads hook input from stdin). You don't run this manually. |
 | `terum-capture mcp install` | Connect an already-set-up machine to Terum's MCP server (see below). Accepts `--client claude` (default) or `--client cursor`. |
+| `terum-capture delivery install` | Opt in to the in-flow delivery hook: on every Claude Code prompt, relevant team knowledge is injected before the model works (plus a periodic reminder to conflict-check its own decisions). Requires the MCP-connected setup. `delivery uninstall` removes it. Fail-open: if Terum is unreachable, nothing is injected and your session is unaffected. |
 
 `setup` accepts `--url <api>` (defaults to `https://api.terum.ai/api`) and `--token <jwt>` to skip the browser for headless/CI installs (non-interactive setup skips the backfill and MCP prompts). It also accepts `--mcp` (install MCP directly without prompting, even on a non-interactive run) and `--no-mcp` (skip MCP entirely); by default it asks with a `[Y/n]` prompt when run interactively and skips silently otherwise.
 
