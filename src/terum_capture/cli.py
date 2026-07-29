@@ -1,13 +1,17 @@
 import sys
 
+from terum_capture.output import die
+
+COMMANDS_LINE = (
+    "Commands: upload, setup, backfill, status, update, setup-hook, logout, mcp, delivery"
+)
+
 
 def main():
     args = sys.argv[1:]
 
     if not args:
-        print("Usage: terum-capture <command>")
-        print("Commands: upload, setup, backfill, status, update, setup-hook, logout, mcp, delivery")
-        sys.exit(1)
+        die("Usage: terum-capture <command>", COMMANDS_LINE)
 
     command = args[0]
 
@@ -88,8 +92,7 @@ def main():
         if event == "prompt":
             run_prompt_hook()
         else:
-            print("Usage: terum-capture delivery-hook prompt")
-            sys.exit(1)
+            die("Usage: terum-capture delivery-hook prompt")
 
     elif command == "delivery":
         from terum_capture.delivery_hooks import cmd_delivery
@@ -103,32 +106,26 @@ def main():
             while i < len(args):
                 if args[i] == "--client":
                     if i + 1 >= len(args):
-                        print("Error: --client requires a value (claude|cursor).")
-                        sys.exit(1)
+                        die("Error: --client requires a value (claude|cursor).")
                     client = args[i + 1]
                     i += 2
                 else:
                     i += 1
             if client not in ("claude", "cursor"):
-                print(f"Error: unknown MCP client '{client}'. Use claude or cursor.")
-                sys.exit(1)
+                die(f"Error: unknown MCP client '{client}'. Use claude or cursor.")
             cmd_mcp_install(client)
         else:
-            print("Usage: terum-capture mcp install [--client claude|cursor]")
-            sys.exit(1)
+            die("Usage: terum-capture mcp install [--client claude|cursor]")
 
     else:
-        print(f"Unknown command: {command}")
-        print("Commands: upload, setup, backfill, status, update, setup-hook, logout, mcp, delivery")
-        sys.exit(1)
+        die(f"Unknown command: {command}", COMMANDS_LINE)
 
 
 def _parse_int(value: str, flag: str) -> int:
     try:
         return int(value)
     except ValueError:
-        print(f"Error: {flag} expects an integer, got {value!r}.")
-        sys.exit(1)
+        die(f"Error: {flag} expects an integer, got {value!r}.")
 
 
 if __name__ == "__main__":

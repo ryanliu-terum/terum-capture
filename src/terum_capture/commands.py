@@ -12,6 +12,7 @@ import httpx
 
 from terum_capture import __version__
 from terum_capture.config import load_config, save_config, delete_config, CallbackServer
+from terum_capture.output import die
 
 DEFAULT_API_URL = "https://api.terum.ai/api"
 DASHBOARD_URL = "https://app.terum.ai"
@@ -467,8 +468,7 @@ def _maybe_configure_mcp_interactive(api_key: str, api_url: str, choice: bool | 
 def cmd_mcp_install(client: str = "claude"):
     config = load_config()
     if not config or not config.get("api_key"):
-        print("Not configured. Run: terum-capture setup")
-        sys.exit(1)
+        die("Not configured. Run: terum-capture setup")
 
     result = _configure_mcp(config["api_key"], config.get("api_url", DEFAULT_API_URL), client=client)
 
@@ -481,8 +481,7 @@ def cmd_mcp_install(client: str = "claude"):
     elif result == "already":
         print(f"MCP already configured for {label} — left it as-is.")
     else:
-        print(f"Could not configure MCP for {label}.")
-        sys.exit(1)
+        die(f"Could not configure MCP for {label}.")
 
 
 def _configure_mcp(api_key: str, api_url: str, client: str = "claude") -> str:

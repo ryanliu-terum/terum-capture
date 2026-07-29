@@ -14,6 +14,7 @@ import subprocess
 import sys
 
 from terum_capture import __version__
+from terum_capture.output import die
 
 REPO_URL = "git+https://github.com/ryanliu-terum/terum-capture"
 
@@ -46,14 +47,11 @@ def cmd_update():
     try:
         result = subprocess.run(cmd, timeout=300)
     except FileNotFoundError:
-        print(f"Error: could not run {cmd[0]!r}. Is it installed and on your PATH?")
-        sys.exit(1)
+        die(f"Error: could not run {cmd[0]!r}. Is it installed and on your PATH?")
     except subprocess.SubprocessError as exc:
-        print(f"Error: reinstall failed to run: {exc}")
-        sys.exit(1)
+        die(f"Error: reinstall failed to run: {exc}")
     if result.returncode != 0:
-        print(f"Error: reinstall failed (exit {result.returncode}).")
-        sys.exit(1)
+        die(f"Error: reinstall failed (exit {result.returncode}).")
 
     # Refresh the Stop-hook config using the JUST-installed code — this process still
     # holds the OLD code in memory, so a new hook timeout/command only lands in

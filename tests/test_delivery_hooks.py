@@ -15,6 +15,7 @@ from terum_capture import commands, delivery_hooks
 from terum_capture.delivery_hooks import (
     _format_context,
     _instruction_due,
+    cmd_delivery,
     install_delivery_hooks,
     uninstall_delivery_hooks,
     run_prompt_hook,
@@ -106,6 +107,64 @@ class TestInstallUninstall:
         install_delivery_hooks()  # must not raise
 
         assert "Warning" in capsys.readouterr().out
+
+    def test_install_echoes_the_resolved_interpreter_path(self, tmp_path, monkeypatch, capsys):
+        """bug-559: the hook command bakes in sys.executable, so a wrong interpreter (a dev
+        checkout's editable venv) is frozen in and silently dies when that tree changes branch.
+        The install MUST echo the resolved path — that is the only thing that makes a bad
+        binding visible while the user is still standing there to notice it."""
+        settings = tmp_path / ".claude" / "settings.json"
+        monkeypatch.setattr(commands, "CLAUDE_SETTINGS", settings)
+        monkeypatch.setattr("sys.executable", "/nowhere/dev-venv/python.exe")
+
+        install_delivery_hooks()
+
+        out = capsys.readouterr().out
+        # The interpreter is the whole point — a bare "installed" line is what hid bug-559.
+        assert "/nowhere/dev-venv/python.exe" in out
+        assert "delivery-hook prompt" in out
+        # And it must be the command that was actually written, not a re-render.
+        written = json.loads(settings.read_text())["hooks"]["UserPromptSubmit"][0]["hooks"][0]
+        assert written["command"] in out
+
+    def test_silent_self_heal_path_also_echoes(self, tmp_path, monkeypatch, capsys):
+        """`setup-hook` / `update` re-freeze the interpreter via _refresh_delivery_hook_if_installed.
+        That path is exactly where a bad interpreter gets re-written unattended, so it must report
+        the command too — otherwise the self-heal can silently re-bind to the wrong Python."""
+        settings = tmp_path / ".claude" / "settings.json"
+        monkeypatch.setattr(commands, "CLAUDE_SETTINGS", settings)
+        install_delivery_hooks()  # pre-existing install, so the refresh engages
+        capsys.readouterr()
+        monkeypatch.setattr("sys.executable", "/canonical/pipx/python.exe")
+
+        commands._refresh_delivery_hook_if_installed()
+
+        assert "/canonical/pipx/python.exe" in capsys.readouterr().out
+
+
+class TestDeliveryCommandStreams:
+    """`cmd_delivery` diagnostics go to stderr (bug-559) — a supervisor reads stderr, and on
+    UserPromptSubmit stdout is treated as context to inject."""
+
+    def test_usage_error_goes_to_stderr(self, capsys):
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_delivery("bogus")
+
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "Usage: terum-capture delivery <install|uninstall>" in captured.err
+        assert captured.out == ""
+
+    def test_unconfigured_install_goes_to_stderr(self, monkeypatch, capsys):
+        monkeypatch.setattr(delivery_hooks, "load_config", lambda: None)
+
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_delivery("install")
+
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "Not configured. Run: terum-capture setup" in captured.err
+        assert captured.out == ""
 
 
 class TestFormatContext:

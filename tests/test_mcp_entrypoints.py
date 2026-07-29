@@ -127,8 +127,9 @@ class TestCmdMcpInstall:
             cmd_mcp_install()
 
         assert exc_info.value.code == 1
-        out = capsys.readouterr().out
-        assert "Not configured. Run: terum-capture setup" in out
+        captured = capsys.readouterr()
+        assert "Not configured. Run: terum-capture setup" in captured.err
+        assert captured.out == ""
 
     def test_no_api_key_exits_1(self, monkeypatch, capsys):
         monkeypatch.setattr(commands, "load_config", lambda: {"api_url": API_URL})
@@ -137,8 +138,9 @@ class TestCmdMcpInstall:
             cmd_mcp_install()
 
         assert exc_info.value.code == 1
-        out = capsys.readouterr().out
-        assert "Not configured. Run: terum-capture setup" in out
+        captured = capsys.readouterr()
+        assert "Not configured. Run: terum-capture setup" in captured.err
+        assert captured.out == ""
 
     def test_happy_path_calls_configure_mcp_with_stored_config(self, monkeypatch):
         monkeypatch.setattr(
@@ -188,8 +190,8 @@ class TestCmdMcpInstall:
             cmd_mcp_install()
 
         assert exc_info.value.code == 1
-        out = capsys.readouterr().out
-        assert "Could not configure MCP for Claude Code." in out
+        captured = capsys.readouterr()
+        assert "Could not configure MCP for Claude Code." in captured.err
 
     def test_missing_api_url_falls_back_to_default(self, monkeypatch):
         """FIX 4: cmd_mcp_install must not KeyError on a config missing api_url — it
