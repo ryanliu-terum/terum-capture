@@ -91,8 +91,11 @@ actually call them at the right moments:
   library / API / schema / auth decision, or a destructive or hard-to-reverse action — call
   `check_decision` with the specific action you're about to take. It surfaces conflicts with
   the team's standing decisions and is silent when nothing conflicts.
-- When you start work in an unfamiliar area, or before answering a question that assumes team
-  context, call `search_team_knowledge` first to find what the team already decided or discussed.
+- When a question is about what's already been decided, discussed, or figured out, by you OR by
+  a teammate (e.g. "what did we decide about X", "are we still doing Y", the status of ongoing
+  work, a prior finding), call `search_team_knowledge` first. Much of this lives ONLY in the
+  team's shared record, not in your repo, so don't answer from a code or file search alone;
+  check team knowledge before concluding something isn't written down or doesn't exist.
 - Call `get_standing_decisions` to catch up on the team's recent decisions before proposing
   something new.
 

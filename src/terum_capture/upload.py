@@ -18,6 +18,9 @@ MAX_EVENTS_PER_BATCH = 50
 # to this ceiling. The live hook's 50-cap never reaches it, so a chunk == one POST there.
 SERVER_MAX_EVENTS = 10000
 HTTP_TIMEOUT = 10.0
+# Best-effort dual-send mirror (e.g. staging) uses a shorter timeout so a hung mirror
+# can never stall the Stop hook — the primary (prod) send has already completed by then.
+MIRROR_TIMEOUT = 5.0
 GIT_TIMEOUT = 5.0
 
 # git remote URL forms we normalize to a canonical "owner/repo":
@@ -612,7 +615,36 @@ def _post_events(config, events, sidecar, new_offset, repo, tokens) -> ProcessRe
             return ProcessResult("failed", events=sent, status_code=resp.status_code)
         sent += len(chunk)
     _write_sidecar(sidecar, new_offset, repo, tokens)
+    _post_to_mirrors(config, events)
     return ProcessResult("uploaded", events=sent, status_code=200)
+
+
+def _post_to_mirrors(config, events):
+    """Best-effort dual-send: mirror the SAME events to every config['extra_targets'].
+
+    Additive only — runs AFTER the primary (prod) send has succeeded and its sidecar offset
+    is persisted, so a mirror can never affect the primary result, the offset, or delivery
+    guarantees. Every error is swallowed and a short timeout bounds a hung mirror so it
+    cannot stall the Stop hook. Each target is {"api_key": "trm_...", "api_url": ".../api"}.
+    Trade-off: a mirror that is down for a run simply misses those turns (no retry) — fine
+    for a test/staging mirror, since prod remains the source of truth.
+    """
+    for target in config.get("extra_targets") or []:
+        api_url = target.get("api_url")
+        api_key = target.get("api_key")
+        if not api_url or not api_key:
+            continue
+        url = f"{api_url}/ingest/llm-history"
+        headers = {"Authorization": f"Bearer {api_key}"}
+        try:
+            for start in range(0, len(events), SERVER_MAX_EVENTS):
+                chunk = events[start:start + SERVER_MAX_EVENTS]
+                resp = httpx.post(url, json={"events": chunk}, headers=headers, timeout=MIRROR_TIMEOUT)
+                if resp.status_code not in (200, 201):
+                    print(f"terum-capture: mirror {api_url} returned {resp.status_code}", file=sys.stderr)
+                    break
+        except Exception as exc:
+            print(f"terum-capture: mirror {api_url} failed: {exc}", file=sys.stderr)
 
 
 def _cleanup_old_sidecars():
