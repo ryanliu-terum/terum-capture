@@ -78,6 +78,10 @@ makes the captured data richer.
 # "in-flow team context" silently never fires. Appended only when MCP is actually wired for
 # Claude Code (see _configure_mcp call sites); Cursor has no ~/.claude/CLAUDE.md.
 MCP_USAGE_HEADER = "## Terum Team Knowledge (MCP)"
+# Invisible in rendered markdown; bounds the managed span so upserts can replace the block
+# without touching anything the user wrote below it. Legacy blocks (pre-marker) are replaced
+# conservatively up to the next "## " heading or EOF.
+MCP_USAGE_END_MARKER = "<!-- /terum-mcp-usage -->"
 
 MCP_USAGE_BLOCK = """
 ## Terum Team Knowledge (MCP)
@@ -91,18 +95,23 @@ actually call them at the right moments:
   library / API / schema / auth decision, or a destructive or hard-to-reverse action — call
   `check_decision` with the specific action you're about to take. It surfaces conflicts with
   the team's standing decisions and is silent when nothing conflicts.
-- When you start work in an unfamiliar area, or before answering a question that assumes team
-  context, call `search_team_knowledge` first to find what the team already decided or discussed.
+- When a question is about what's already been decided, discussed, or figured out, by you OR by
+  a teammate (e.g. "what did we decide about X", "are we still doing Y", the status of ongoing
+  work, a prior finding), call `search_team_knowledge` first. Much of this lives ONLY in the
+  team's shared record, not in your repo, so don't answer from a code or file search alone;
+  check team knowledge before concluding something isn't written down or doesn't exist.
 - Call `get_standing_decisions` to catch up on the team's recent decisions before proposing
   something new.
 
 This is separate from Terum's automatic session capture, which needs no tool calls: capture
 records your work for the team, while these knowledge tools are yours to call to pull the
 team's context into your work.
+<!-- /terum-mcp-usage -->
 """
 
 
-def cmd_setup(api_url: str | None = None, token: str | None = None, mcp: bool | None = None):
+def cmd_setup(api_url: str | None = None, token: str | None = None, mcp: bool | None = None,
+              delivery: bool | None = None):
     api_url = api_url or DEFAULT_API_URL
     # Whether a token was passed non-interactively (--token). Captured before
     # _browser_auth reassigns `token`, so the backfill auto-prompt can stay TTY-gated.
@@ -176,6 +185,7 @@ def cmd_setup(api_url: str | None = None, token: str | None = None, mcp: bool | 
     _append_claude_md()
 
     _maybe_configure_mcp_interactive(api_key, api_url, mcp)
+    _maybe_install_delivery_interactive(delivery)
 
     prefix = api_key[:8]
     print(f"\nTerum connected! Key: {prefix}...")
@@ -187,17 +197,69 @@ def cmd_setup(api_url: str | None = None, token: str | None = None, mcp: bool | 
 
 
 def cmd_setup_hook():
-    """Refresh ONLY the Stop-hook config to this installed package's canonical form.
+    """Refresh every MANAGED artifact to this installed package's canonical form.
 
-    Unlike ``setup``, this mints no API key and prompts for nothing — it just rewrites
-    the terum hook entry in ~/.claude/settings.json to the current command + timeout.
-    Used by ``update`` (after the reinstall) and safe to run anytime to repair hook drift.
+    Unlike ``setup``, this mints no API key and prompts for nothing. It rewrites the
+    terum Stop-hook entry in ~/.claude/settings.json (command + timeout), refreshes the
+    MCP-usage block wording in ~/.claude/CLAUDE.md IF the block exists, and re-canonicalizes
+    the delivery hook IF it is installed. Refresh-only by design: it never adds the nudge
+    block or the delivery hook to a machine that didn't opt in — ``update`` runs this, and
+    a maintenance command must never flip defaults. Safe to run anytime to repair drift.
     """
     _configure_hook()
+    _upsert_mcp_usage_claude_md(add_if_missing=False)
+    _refresh_delivery_hook_if_installed()
     print(
         f"terum-capture {__version__}: Stop hook refreshed (timeout {HOOK_TIMEOUT}s). "
         "Restart any open Claude Code sessions to load it."
     )
+
+
+def _refresh_delivery_hook_if_installed():
+    """Re-canonicalize the delivery hook entry IF the user opted in (refresh-only).
+
+    Lets ``update`` ship delivery-hook command/timeout changes the same way it ships
+    Stop-hook changes, without ever installing the hook on a machine that never ran
+    ``delivery install``. Warn-don't-crash (unreadable settings -> leave untouched)."""
+    from terum_capture.delivery_hooks import _is_our_delivery_group, install_delivery_hooks
+    try:
+        if not CLAUDE_SETTINGS.exists():
+            return
+        settings = json.loads(CLAUDE_SETTINGS.read_text())
+        groups = settings.get("hooks", {}).get("UserPromptSubmit", [])
+        if any(_is_our_delivery_group(g) for g in groups):
+            install_delivery_hooks()
+    except Exception as exc:
+        print(f"Warning: Could not refresh the delivery hook: {exc}")
+
+
+def _maybe_install_delivery_interactive(choice: bool | None) -> None:
+    """The opt-in delivery prompt at the end of `cmd_setup` (default-YES on a TTY).
+
+    Same tri-state contract as _maybe_configure_mcp_interactive: None -> ask on a TTY,
+    skip silently otherwise; True -> forced yes (--delivery); False -> forced skip
+    (--no-delivery). Consent lives HERE, at setup time, deliberately: `update` never
+    installs the hook (a maintenance command must not flip a machine's defaults)."""
+    if choice is False:
+        return
+
+    if choice is None:
+        if not sys.stdin.isatty():
+            return
+        try:
+            answer = input(
+                "Also inject relevant team knowledge into each Claude Code prompt "
+                "(in-flow delivery; fail-open, removable with 'terum-capture delivery "
+                "uninstall')? [Y/n] "
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return
+        if answer in ("n", "no"):
+            return
+
+    from terum_capture.delivery_hooks import install_delivery_hooks
+    install_delivery_hooks()
+    print("Delivery hook installed — each prompt now arrives with relevant team context.")
 
 
 def _maybe_offer_backfill(interactive: bool):
@@ -323,23 +385,45 @@ def _append_claude_md():
         print(f"Warning: Could not update CLAUDE.md: {exc}")
 
 
-def _append_mcp_usage_claude_md():
-    """Append MCP-usage guidance to ~/.claude/CLAUDE.md so the agent knows WHEN to call the
-    Terum MCP tools. Idempotent (keyed on MCP_USAGE_HEADER), append-only, and warn-don't-crash —
-    mirrors _append_claude_md exactly. Claude Code only; called after MCP is wired for `claude`."""
+def _upsert_mcp_usage_claude_md(add_if_missing: bool = True):
+    """Install or refresh the MANAGED MCP-usage block in ~/.claude/CLAUDE.md.
+
+    The block spans MCP_USAGE_HEADER .. MCP_USAGE_END_MARKER and is replaced wholesale with
+    this package's current wording, so shipped nudge improvements reach existing installs on
+    `update` (via setup-hook) instead of fossilizing per-machine. Everything outside the span
+    is preserved. A legacy block without the end marker is replaced up to the next "## "
+    heading or EOF — the conservative bound. `add_if_missing=False` is the refresh-only mode
+    (setup-hook/update): a machine that never wired MCP is never given the block as a side
+    effect. Warn-don't-crash, mirroring _append_claude_md."""
     try:
         CLAUDE_MD.parent.mkdir(parents=True, exist_ok=True)
-        existing = ""
-        if CLAUDE_MD.exists():
-            existing = CLAUDE_MD.read_text()
+        existing = CLAUDE_MD.read_text() if CLAUDE_MD.exists() else ""
+        lines = existing.split("\n")
+        start = next((i for i, l in enumerate(lines) if l.strip() == MCP_USAGE_HEADER), None)
 
-        if MCP_USAGE_HEADER in existing:
+        if start is None:
+            if not add_if_missing:
+                return
+            with open(CLAUDE_MD, "a") as f:
+                if existing and not existing.endswith("\n"):
+                    f.write("\n")
+                f.write(MCP_USAGE_BLOCK)
             return
 
-        with open(CLAUDE_MD, "a") as f:
-            if existing and not existing.endswith("\n"):
-                f.write("\n")
-            f.write(MCP_USAGE_BLOCK)
+        end = next((i for i in range(start + 1, len(lines))
+                    if lines[i].strip() == MCP_USAGE_END_MARKER), None)
+        if end is None:  # legacy block: no marker -> stop before the next section heading
+            nxt = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), None)
+            end = (nxt - 1) if nxt is not None else (len(lines) - 1)
+
+        block_lines = MCP_USAGE_BLOCK.strip("\n").split("\n")
+        tail = lines[end + 1:]
+        spacer = [""] if tail and tail[0].strip() else []
+        new_lines = lines[:start] + block_lines + spacer + tail
+        out = "\n".join(new_lines)
+        if not out.endswith("\n"):
+            out += "\n"
+        CLAUDE_MD.write_text(out)
     except Exception as exc:
         print(f"Warning: Could not update CLAUDE.md with MCP guidance: {exc}")
 
@@ -371,10 +455,10 @@ def _maybe_configure_mcp_interactive(api_key: str, api_url: str, choice: bool | 
 
     result = _configure_mcp(api_key, api_url, client="claude")
     if result == "installed":
-        _append_mcp_usage_claude_md()
+        _upsert_mcp_usage_claude_md()
         print("MCP connected — your agent can now pull team decisions & run conflict checks.")
     elif result == "already":
-        _append_mcp_usage_claude_md()
+        _upsert_mcp_usage_claude_md()
         print("MCP already configured — left it as-is.")
     else:
         print("Could not auto-configure MCP. Run 'terum-capture mcp install' later.")
@@ -391,7 +475,7 @@ def cmd_mcp_install(client: str = "claude"):
     label = "Cursor" if client == "cursor" else "Claude Code"
     # The usage guidance lives in ~/.claude/CLAUDE.md — Claude Code only (Cursor has no such file).
     if client == "claude" and result in ("installed", "already"):
-        _append_mcp_usage_claude_md()
+        _upsert_mcp_usage_claude_md()
     if result == "installed":
         print(f"MCP connected for {label}.")
     elif result == "already":

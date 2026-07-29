@@ -6,7 +6,7 @@ def main():
 
     if not args:
         print("Usage: terum-capture <command>")
-        print("Commands: upload, setup, backfill, status, update, setup-hook, logout, mcp")
+        print("Commands: upload, setup, backfill, status, update, setup-hook, logout, mcp, delivery")
         sys.exit(1)
 
     command = args[0]
@@ -39,6 +39,7 @@ def main():
         url = None
         token = None
         mcp = None
+        delivery = None
         i = 1
         while i < len(args):
             if args[i] == "--url" and i + 1 < len(args):
@@ -53,9 +54,15 @@ def main():
             elif args[i] == "--no-mcp":
                 mcp = False
                 i += 1
+            elif args[i] == "--delivery":
+                delivery = True
+                i += 1
+            elif args[i] == "--no-delivery":
+                delivery = False
+                i += 1
             else:
                 i += 1
-        cmd_setup(api_url=url, token=token, mcp=mcp)
+        cmd_setup(api_url=url, token=token, mcp=mcp, delivery=delivery)
 
     elif command == "status":
         from terum_capture.commands import cmd_status
@@ -72,6 +79,21 @@ def main():
     elif command == "logout":
         from terum_capture.commands import cmd_logout
         cmd_logout()
+
+    elif command == "delivery-hook":
+        # Invoked by the Claude Code hook itself (reads the hook payload from stdin), like
+        # `upload`. Not run by hand. `delivery-hook prompt` = UserPromptSubmit.
+        from terum_capture.delivery_hooks import run_prompt_hook
+        event = args[1] if len(args) >= 2 else ""
+        if event == "prompt":
+            run_prompt_hook()
+        else:
+            print("Usage: terum-capture delivery-hook prompt")
+            sys.exit(1)
+
+    elif command == "delivery":
+        from terum_capture.delivery_hooks import cmd_delivery
+        cmd_delivery(args[1] if len(args) >= 2 else "")
 
     elif command == "mcp":
         if len(args) >= 2 and args[1] == "install":
@@ -97,7 +119,7 @@ def main():
 
     else:
         print(f"Unknown command: {command}")
-        print("Commands: upload, setup, backfill, status, update, setup-hook, logout, mcp")
+        print("Commands: upload, setup, backfill, status, update, setup-hook, logout, mcp, delivery")
         sys.exit(1)
 
 

@@ -26,16 +26,18 @@ class TestSetupMcpFlagWiring:
     def test_no_flags_passes_none(self, monkeypatch):
         recorded = {}
 
-        def fake_cmd_setup(api_url=None, token=None, mcp=None):
+        def fake_cmd_setup(api_url=None, token=None, mcp=None, delivery=None):
             recorded["mcp"] = mcp
             recorded["api_url"] = api_url
             recorded["token"] = token
+            recorded["delivery"] = delivery
 
         monkeypatch.setattr(commands, "cmd_setup", fake_cmd_setup)
 
         run_cli(monkeypatch, ["setup"])
 
         assert recorded["mcp"] is None
+        assert recorded["delivery"] is None
         assert recorded["api_url"] is None
         assert recorded["token"] is None
 
@@ -43,7 +45,7 @@ class TestSetupMcpFlagWiring:
         recorded = {}
         monkeypatch.setattr(
             commands, "cmd_setup",
-            lambda api_url=None, token=None, mcp=None: recorded.setdefault("mcp", mcp),
+            lambda api_url=None, token=None, mcp=None, delivery=None: recorded.update(mcp=mcp, delivery=delivery),
         )
 
         run_cli(monkeypatch, ["setup", "--mcp"])
@@ -54,7 +56,7 @@ class TestSetupMcpFlagWiring:
         recorded = {}
         monkeypatch.setattr(
             commands, "cmd_setup",
-            lambda api_url=None, token=None, mcp=None: recorded.setdefault("mcp", mcp),
+            lambda api_url=None, token=None, mcp=None, delivery=None: recorded.update(mcp=mcp, delivery=delivery),
         )
 
         run_cli(monkeypatch, ["setup", "--no-mcp"])
@@ -64,10 +66,11 @@ class TestSetupMcpFlagWiring:
     def test_mcp_flag_combined_with_url_and_token(self, monkeypatch):
         recorded = {}
 
-        def fake_cmd_setup(api_url=None, token=None, mcp=None):
+        def fake_cmd_setup(api_url=None, token=None, mcp=None, delivery=None):
             recorded["api_url"] = api_url
             recorded["token"] = token
             recorded["mcp"] = mcp
+            recorded["delivery"] = delivery
 
         monkeypatch.setattr(commands, "cmd_setup", fake_cmd_setup)
 
@@ -204,3 +207,23 @@ class TestExistingCommandsUnaffected:
         run_cli(monkeypatch, ["upload"])
 
         assert called.get("hit") is True
+
+
+class TestSetupDeliveryFlagWiring:
+    def _record(self, monkeypatch):
+        recorded = {}
+        monkeypatch.setattr(
+            commands, "cmd_setup",
+            lambda api_url=None, token=None, mcp=None, delivery=None: recorded.update(delivery=delivery),
+        )
+        return recorded
+
+    def test_delivery_flag_forces_true(self, monkeypatch):
+        recorded = self._record(monkeypatch)
+        run_cli(monkeypatch, ["setup", "--delivery"])
+        assert recorded["delivery"] is True
+
+    def test_no_delivery_flag_forces_false(self, monkeypatch):
+        recorded = self._record(monkeypatch)
+        run_cli(monkeypatch, ["setup", "--no-delivery"])
+        assert recorded["delivery"] is False
