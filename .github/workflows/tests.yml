@@ -68,3 +68,27 @@ jobs:
             echo "::error::The suite modified files under HOME (bug-560): a ~-rooted path escaped tests/conftest.py's isolation. On a developer machine this rewrites the live ~/.claude/settings.json. Patch the new constant into conftest.py's isolate_home fixture."
             exit 1
           fi
+
+  # bug-561's follow-up gate. A fatal diagnostic must not go to stdout (a supervising hook
+  # surfaces stderr, so stdout is where a reason goes to die — bug-559), and a command that
+  # reports a failure must exit non-zero (`setup` printed Error: and exited 0, so
+  # `setup && next-step` ran next-step over a failed onboarding — bug-561).
+  #
+  # Its own job, not a step in the matrix: the check is interpreter-independent, so running it
+  # five times would only buy five copies of the same answer. stdlib `ast` only — no install,
+  # which is why this job has no pip step at all.
+  #
+  # The checker is also covered BY the suite above (tests/test_error_stream_lint.py), including a
+  # replay against the pre-fix source in git history. This job is what makes it block a merge.
+  output-discipline:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - run: python scripts/check_error_streams.py

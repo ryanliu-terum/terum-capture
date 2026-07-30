@@ -75,6 +75,13 @@ pip install -e ".[dev]"   # the dev extra is pytest
 pytest
 ```
 
+Two conventions are enforced by `scripts/check_error_streams.py` (also run in CI): a fatal
+diagnostic goes to stderr via `output.die()`/`output.err()`, never stdout — a supervising Claude
+Code hook surfaces stderr, so a reason on stdout is invisible exactly when it matters (bug-559) —
+and a `cmd_*` that reports a failure must exit non-zero (bug-561). Run it with
+`python scripts/check_error_streams.py`; the contract it enforces is documented in
+`src/terum_capture/output.py`.
+
 The suite must never touch your real home directory — it once rewrote a developer's live
 `~/.claude/settings.json` and broke Claude Code (bug-560). `tests/conftest.py` redirects every
 `~`-rooted path to `tmp_path`, and CI asserts it stayed that way. To check by hand:

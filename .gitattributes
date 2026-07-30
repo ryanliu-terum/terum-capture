@@ -6,3 +6,6 @@
 *.sh text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
+# .py too: CI runs these with `python <file>`, but scripts/ carries a shebang and a CRLF there
+# breaks `./scripts/check_error_streams.py` with a bare "bad interpreter" on Linux.
+*.py text eol=lf
