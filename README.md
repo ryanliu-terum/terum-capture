@@ -71,9 +71,26 @@ cd terum-capture
 
 # Build the venv from a 3.10+ interpreter (pin: see .python-version)
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e .
-pip install pytest
+pip install -e ".[dev]"   # the dev extra is pytest
 pytest
+```
+
+Two conventions are enforced by `scripts/check_error_streams.py` (also run in CI): a fatal
+diagnostic goes to stderr via `output.die()`/`output.err()`, never stdout — a supervising Claude
+Code hook surfaces stderr, so a reason on stdout is invisible exactly when it matters (bug-559) —
+and a `cmd_*` that reports a failure must exit non-zero (bug-561). Run it with
+`python scripts/check_error_streams.py`; the contract it enforces is documented in
+`src/terum_capture/output.py`.
+
+The suite must never touch your real home directory — it once rewrote a developer's live
+`~/.claude/settings.json` and broke Claude Code (bug-560). `tests/conftest.py` redirects every
+`~`-rooted path to `tmp_path`, and CI asserts it stayed that way. To check by hand:
+
+```bash
+bash scripts/home-fingerprint.sh ~/.claude/settings.json ~/.claude/CLAUDE.md ~/.terum/config.json > /tmp/before
+pytest -q
+bash scripts/home-fingerprint.sh ~/.claude/settings.json ~/.claude/CLAUDE.md ~/.terum/config.json > /tmp/after
+diff -u /tmp/before /tmp/after   # any output means a test escaped its tmp_path
 ```
 
 ## License

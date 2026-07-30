@@ -22,7 +22,14 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
+
+# pytest was never a declared dependency, so the 269-test suite only ran where someone happened
+# to have installed it by hand, and CI had no way to know what to install. Declared here so
+# `pip install -e ".[dev]"` is the one documented way to get a working test environment.
+[project.optional-dependencies]
+dev = ["pytest>=8"]
 
 [project.urls]
 Homepage = "https://terum.ai"
