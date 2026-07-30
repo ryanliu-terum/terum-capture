@@ -1,0 +1,14 @@
+# Every location under $HOME that terum_capture is capable of writing. One path per line, relative
+# to $HOME; a directory means the whole tree beneath it. This file is the single source of truth for
+# two consumers, which is why it is data and not a list duplicated in a shell script and a test:
+#
+#   - scripts/home-fingerprint.sh (called with no arguments) fingerprints exactly these, so CI can
+#     assert the test suite touched none of them (bug-560).
+#   - tests/test_home_isolation_coverage.py fails if any `Path.home() / "..."` constant in src/
+#     names a top-level entry missing from this list, or if tests/conftest.py does not isolate it.
+#     That is what stops this list going quietly stale when a ninth ~-rooted constant is added.
+#
+.claude
+.claude.json
+.cursor
+.terum
