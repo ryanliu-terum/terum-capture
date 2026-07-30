@@ -47,4 +47,9 @@ def isolate_home(tmp_path, monkeypatch):
     monkeypatch.setattr(upload, "TERUM_DIR", terum)
     monkeypatch.setattr(delivery_hooks, "STATE_FILE", terum / "delivery_state.json")
 
+    # _CallbackHandler.result is CLASS state that survives between tests, so whichever OAuth-callback
+    # test ran last decides which branch `wait_for_callback` takes in the next one. That made a
+    # stderr test pass alone and fail in-suite. Reset it so ordering cannot leak.
+    monkeypatch.setattr(config._CallbackHandler, "result", None)
+
     return home
