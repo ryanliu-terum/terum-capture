@@ -114,8 +114,9 @@ class TestMcpInstallSubcommand:
             run_cli(monkeypatch, ["mcp", "install", "--client", "vscode"])
 
         assert exc_info.value.code == 1
-        out = capsys.readouterr().out
-        assert "Error: unknown MCP client 'vscode'. Use claude or cursor." in out
+        captured = capsys.readouterr()
+        assert "Error: unknown MCP client 'vscode'. Use claude or cursor." in captured.err
+        assert captured.out == ""
         assert "hit" not in called
 
     def test_mcp_install_client_flag_missing_value_exits_1(self, monkeypatch, capsys):
@@ -128,8 +129,9 @@ class TestMcpInstallSubcommand:
             run_cli(monkeypatch, ["mcp", "install", "--client"])
 
         assert exc_info.value.code == 1
-        out = capsys.readouterr().out
-        assert "Error: --client requires a value (claude|cursor)." in out
+        captured = capsys.readouterr()
+        assert "Error: --client requires a value (claude|cursor)." in captured.err
+        assert captured.out == ""
         assert "hit" not in called
 
     def test_mcp_install_client_cursor_still_dispatches(self, monkeypatch):
@@ -147,16 +149,18 @@ class TestMcpInstallSubcommand:
             run_cli(monkeypatch, ["mcp"])
 
         assert exc_info.value.code == 1
-        out = capsys.readouterr().out
-        assert "Usage: terum-capture mcp install [--client claude|cursor]" in out
+        captured = capsys.readouterr()
+        assert "Usage: terum-capture mcp install [--client claude|cursor]" in captured.err
+        assert captured.out == ""
 
     def test_mcp_unknown_subcommand_prints_usage_and_exits_1(self, monkeypatch, capsys):
         with pytest.raises(SystemExit) as exc_info:
             run_cli(monkeypatch, ["mcp", "bogus"])
 
         assert exc_info.value.code == 1
-        out = capsys.readouterr().out
-        assert "Usage: terum-capture mcp install [--client claude|cursor]" in out
+        captured = capsys.readouterr()
+        assert "Usage: terum-capture mcp install [--client claude|cursor]" in captured.err
+        assert captured.out == ""
 
 
 class TestUsageBanners:
@@ -165,17 +169,19 @@ class TestUsageBanners:
             run_cli(monkeypatch, [])
 
         assert exc_info.value.code == 1
-        out = capsys.readouterr().out
-        assert "Commands: upload, setup, backfill, status, update, setup-hook, logout, mcp" in out
+        captured = capsys.readouterr()
+        assert "Commands: upload, setup, backfill, status, update, setup-hook, logout, mcp" in captured.err
+        assert captured.out == ""
 
     def test_unknown_command_lists_mcp_in_commands(self, monkeypatch, capsys):
         with pytest.raises(SystemExit) as exc_info:
             run_cli(monkeypatch, ["bogus"])
 
         assert exc_info.value.code == 1
-        out = capsys.readouterr().out
-        assert "Unknown command: bogus" in out
-        assert "Commands: upload, setup, backfill, status, update, setup-hook, logout, mcp" in out
+        captured = capsys.readouterr()
+        assert "Unknown command: bogus" in captured.err
+        assert "Commands: upload, setup, backfill, status, update, setup-hook, logout, mcp" in captured.err
+        assert captured.out == ""
 
 
 class TestExistingCommandsUnaffected:

@@ -32,6 +32,7 @@ from pathlib import Path
 import httpx
 
 from terum_capture.config import CONFIG_DIR, load_config
+from terum_capture.output import die
 
 # Under Claude Code's 30s UserPromptSubmit budget with margin; fail-open past it (inject nothing).
 HOOK_HTTP_TIMEOUT = 8.0
@@ -222,8 +223,18 @@ def install_delivery_hooks() -> None:
                 hooks[event] = [e for e in hooks[event] if not _is_our_delivery_group(e)]
                 if not hooks[event]:
                     del hooks[event]
-        hooks.setdefault("UserPromptSubmit", []).append(_delivery_entry("delivery-hook prompt", 30))
+        entry = _delivery_entry("delivery-hook prompt", 30)
+        hooks.setdefault("UserPromptSubmit", []).append(entry)
         CLAUDE_SETTINGS.write_text(json.dumps(settings, indent=2) + "\n")
+        # Echo the RESOLVED command, not just "installed". _routed_command bakes in
+        # sys.executable, so whichever interpreter ran the install is frozen into the hook
+        # forever — and if that is a dev checkout's editable venv, the hook silently dies the
+        # next time that tree changes branch (bug-559: 8 commits of drift, every prompt erroring,
+        # in-flow delivery never firing). Printing the path is what makes a wrong binding visible
+        # while the user is still standing here. Printed from inside install so the SILENT
+        # self-heal path (setup-hook / update -> _refresh_delivery_hook_if_installed) reports it
+        # too — that path re-freezes the interpreter, so it is exactly where a bad one hides.
+        print(f"Delivery hook command: {entry['hooks'][0]['command']}")
     except Exception as exc:
         print(f"Warning: Could not install delivery hooks: {exc}")
 
@@ -252,8 +263,7 @@ def cmd_delivery(action: str) -> None:
     if action == "install":
         config = load_config()
         if not config or not config.get("api_key"):
-            print("Not configured. Run: terum-capture setup")
-            sys.exit(1)
+            die("Not configured. Run: terum-capture setup")
         install_delivery_hooks()
         print("Delivery hook installed (UserPromptSubmit). "
               "Restart any open Claude Code sessions to load it.")
@@ -261,5 +271,4 @@ def cmd_delivery(action: str) -> None:
         uninstall_delivery_hooks()
         print("Delivery hooks removed.")
     else:
-        print("Usage: terum-capture delivery <install|uninstall>")
-        sys.exit(1)
+        die("Usage: terum-capture delivery <install|uninstall>")

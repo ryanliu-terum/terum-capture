@@ -12,6 +12,7 @@ import httpx
 
 from terum_capture import __version__
 from terum_capture.config import load_config, save_config, delete_config, CallbackServer
+from terum_capture.output import die, err
 
 DEFAULT_API_URL = "https://api.terum.ai/api"
 DASHBOARD_URL = "https://app.terum.ai"
@@ -131,14 +132,16 @@ def cmd_setup(api_url: str | None = None, token: str | None = None, mcp: bool | 
                 print("Creating a new key will not revoke the existing one.")
                 answer = input("Continue? [y/N] ").strip().lower()
                 if answer != "y":
-                    return
+                    return  # user DECLINED — a cancellation, not a failure. Exit 0 is correct.
         except Exception:
             pass
 
     if not token:
         token = _browser_auth(api_url)
         if not token:
-            return
+            # Auth failed: _browser_auth already reported the specific reason to stderr, so exit
+            # without a second message — but DO exit non-zero (bug-561: this used to exit 0).
+            sys.exit(1)
 
     hostname = socket.gethostname() or "unknown"
     try:
@@ -149,18 +152,14 @@ def cmd_setup(api_url: str | None = None, token: str | None = None, mcp: bool | 
             timeout=10.0,
         )
     except Exception as exc:
-        print(f"Error: Could not reach {api_url}: {exc}")
-        return
+        die(f"Error: Could not reach {api_url}: {exc}")
 
     if resp.status_code == 409:
-        print("Error: You have 10 active keys. Revoke one first.")
-        return
+        die("Error: You have 10 active keys. Revoke one first.")
     if resp.status_code == 401:
-        print("Error: Token expired or invalid. Run setup again.")
-        return
+        die("Error: Token expired or invalid. Run setup again.")
     if resp.status_code != 201:
-        print(f"Error: Key creation failed (HTTP {resp.status_code}).")
-        return
+        die(f"Error: Key creation failed (HTTP {resp.status_code}).")
 
     data = resp.json()
     api_key = data["key"]
@@ -174,12 +173,10 @@ def cmd_setup(api_url: str | None = None, token: str | None = None, mcp: bool | 
         )
         if verify.status_code != 200:
             delete_config()
-            print("Error: Round-trip verification failed. Config deleted.")
-            return
+            die("Error: Round-trip verification failed. Config deleted.")
     except Exception:
         delete_config()
-        print("Error: Round-trip verification failed. Config deleted.")
-        return
+        die("Error: Round-trip verification failed. Config deleted.")
 
     _configure_hook()
     _append_claude_md()
@@ -467,8 +464,7 @@ def _maybe_configure_mcp_interactive(api_key: str, api_url: str, choice: bool | 
 def cmd_mcp_install(client: str = "claude"):
     config = load_config()
     if not config or not config.get("api_key"):
-        print("Not configured. Run: terum-capture setup")
-        sys.exit(1)
+        die("Not configured. Run: terum-capture setup")
 
     result = _configure_mcp(config["api_key"], config.get("api_url", DEFAULT_API_URL), client=client)
 
@@ -481,8 +477,7 @@ def cmd_mcp_install(client: str = "claude"):
     elif result == "already":
         print(f"MCP already configured for {label} — left it as-is.")
     else:
-        print(f"Could not configure MCP for {label}.")
-        sys.exit(1)
+        die(f"Could not configure MCP for {label}.")
 
 
 def _configure_mcp(api_key: str, api_url: str, client: str = "claude") -> str:
@@ -495,7 +490,12 @@ def _configure_mcp(api_key: str, api_url: str, client: str = "claude") -> str:
     if client == "cursor":
         return _configure_mcp_cursor(api_key, mcp_url)
 
-    print(f"Error: unknown MCP client '{client}'.")
+    # err(), not die(): this function's contract is to return a "failed" sentinel and never raise,
+    # so the caller owns the exit. Without this the specific reason went to stdout while the
+    # caller's generic "Could not configure MCP" went to stderr — one failure split across two
+    # streams. Unreachable via the CLI (cli.py validates the client first); defensive for
+    # programmatic callers.
+    err(f"Error: unknown MCP client '{client}'.")
     return "failed"
 
 
