@@ -71,9 +71,19 @@ cd terum-capture
 
 # Build the venv from a 3.10+ interpreter (pin: see .python-version)
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e .
-pip install pytest
+pip install -e ".[dev]"   # the dev extra is pytest
 pytest
+```
+
+The suite must never touch your real home directory — it once rewrote a developer's live
+`~/.claude/settings.json` and broke Claude Code (bug-560). `tests/conftest.py` redirects every
+`~`-rooted path to `tmp_path`, and CI asserts it stayed that way. To check by hand:
+
+```bash
+bash scripts/home-fingerprint.sh ~/.claude/settings.json ~/.claude/CLAUDE.md ~/.terum/config.json > /tmp/before
+pytest -q
+bash scripts/home-fingerprint.sh ~/.claude/settings.json ~/.claude/CLAUDE.md ~/.terum/config.json > /tmp/after
+diff -u /tmp/before /tmp/after   # any output means a test escaped its tmp_path
 ```
 
 ## License

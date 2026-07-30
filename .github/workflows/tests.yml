@@ -1,0 +1,70 @@
+name: Tests
+
+# The pytest suite had never run anywhere except a developer's own machine: this repo had no
+# .github/workflows at all, so `gh pr checks` answered "no checks reported on the branch". Two
+# bugs fixed here both ended with the same follow-up — the convention needs a gate — and this is
+# that gate:
+#   - bug-560: running `pytest` rewrote the developer's real ~/.claude/settings.json, breaking
+#     every Claude Code prompt after the next branch switch. tests/conftest.py isolates all eight
+#     ~-rooted constants now; the HOME step below is what stops that fixture regressing silently
+#     (it would have caught the PR #11 widening at review time, which nothing did).
+#   - bug-561: `setup` printed `Error:` and exited 0, so no caller could detect failed onboarding.
+#     The exit codes are pinned by tests now — but nothing was running the tests.
+#
+# Hermetic: no secrets and no network. conftest.py points every ~-rooted path at tmp_path.
+on:
+  pull_request:
+    branches: [main]
+  # Also on direct pushes to main. Unlike Terum-MVP this repo has no .githooks/pre-push gate and
+  # is small enough that commits land on main directly, so PR-only coverage would miss exactly
+  # the commits nothing else checks.
+  push:
+    branches: [main]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      # Report every interpreter separately. requires-python is >=3.10, but the only one
+      # installed on the dev machine is 3.14 — 3.10 through 3.13 had never executed this code
+      # before this workflow, so which of them breaks is the information we want; fail-fast
+      # would cancel the siblings and hide it.
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          # pyproject.toml is the only dependency manifest (there is no requirements.txt).
+          # Naming it keeps the cache key off setup-python's '**/' fallback glob.
+          cache-dependency-path: pyproject.toml
+
+      # Non-editable on purpose: pipx installs a built wheel, so this also proves the wheel
+      # carries everything the suite imports. pytest is not a runtime dependency — it lives in
+      # the `dev` extra so that CI (and a new contributor) has exactly one thing to install.
+      - run: pip install ".[dev]"
+
+      - name: Fingerprint HOME before the suite (bug-560)
+        id: home_before
+        run: bash scripts/home-fingerprint.sh > "$RUNNER_TEMP/home-before.txt"
+
+      - run: pytest -q
+
+      # always(): if the suite fails AND it escaped its tmp_path, the escape is the more
+      # important of the two facts and must not be hidden by the first failure. Gated on the
+      # before-snapshot succeeding, so a broken baseline reports itself instead of a bogus diff.
+      - name: Assert the suite touched nothing under HOME (bug-560)
+        if: always() && steps.home_before.outcome == 'success'
+        run: |
+          bash scripts/home-fingerprint.sh > "$RUNNER_TEMP/home-after.txt"
+          if ! diff -u "$RUNNER_TEMP/home-before.txt" "$RUNNER_TEMP/home-after.txt"; then
+            echo "::error::The suite modified files under HOME (bug-560): a ~-rooted path escaped tests/conftest.py's isolation. On a developer machine this rewrites the live ~/.claude/settings.json. Patch the new constant into conftest.py's isolate_home fixture."
+            exit 1
+          fi

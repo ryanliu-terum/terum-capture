@@ -1,0 +1,8 @@
+# The CI runner executes these files on Linux. A CRLF-terminated shell line becomes
+# `$'\r': command not found`, and a CRLF `run:` block in a workflow breaks the same way — a
+# failure mode with nothing to do with the code under test. Windows checkouts here currently
+# have core.autocrlf=true, which normalizes on commit, but that is a per-machine setting; pin
+# it in the repo so it does not depend on how a contributor's git happens to be configured.
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
