@@ -12,7 +12,7 @@ import httpx
 
 from terum_capture import __version__
 from terum_capture.config import load_config, save_config, delete_config, CallbackServer
-from terum_capture.output import die
+from terum_capture.output import die, err
 
 DEFAULT_API_URL = "https://api.terum.ai/api"
 DASHBOARD_URL = "https://app.terum.ai"
@@ -490,7 +490,12 @@ def _configure_mcp(api_key: str, api_url: str, client: str = "claude") -> str:
     if client == "cursor":
         return _configure_mcp_cursor(api_key, mcp_url)
 
-    print(f"Error: unknown MCP client '{client}'.")
+    # err(), not die(): this function's contract is to return a "failed" sentinel and never raise,
+    # so the caller owns the exit. Without this the specific reason went to stdout while the
+    # caller's generic "Could not configure MCP" went to stderr — one failure split across two
+    # streams. Unreachable via the CLI (cli.py validates the client first); defensive for
+    # programmatic callers.
+    err(f"Error: unknown MCP client '{client}'.")
     return "failed"
 
 

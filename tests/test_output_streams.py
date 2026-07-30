@@ -178,6 +178,19 @@ class TestSetupFailuresExitNonZero:
         assert "already have a valid Terum key" in capsys.readouterr().out
 
 
+class TestConfigureMcpUnknownClient:
+    def test_reason_on_stderr_and_still_returns_failed_sentinel(self, capsys):
+        """The caller turns "failed" into die(), so the exit code was already right — but the
+        SPECIFIC reason was on stdout while the caller's generic message went to stderr, splitting
+        one failure across two streams. err() fixes the stream without stealing the caller's
+        control flow (this function's contract is to return a sentinel and never raise)."""
+        assert commands._configure_mcp("trm_k", "https://api.terum.ai/api", client="vscode") == "failed"
+
+        captured = capsys.readouterr()
+        assert "unknown MCP client 'vscode'" in captured.err
+        assert captured.out == ""
+
+
 class TestBrowserAuthReasonsGoToStderr:
     """These are the reasons behind cmd_setup's messageless exit-1 auth path, so they are the only
     thing telling the user WHY onboarding failed. On stdout they were invisible to any supervisor."""
