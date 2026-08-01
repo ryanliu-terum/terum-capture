@@ -13,17 +13,22 @@ import pytest
 
 from terum_capture import commands, delivery_hooks
 from terum_capture.delivery_hooks import (
+    _format_conflict,
     _format_context,
     _instruction_due,
     cmd_delivery,
     install_delivery_hooks,
     uninstall_delivery_hooks,
     run_prompt_hook,
+    CONFLICT_PREAMBLE,
     CONTEXT_MARKER,
+    DECISION_MARKER,
     DELIVERY_HOOK_MARKER,
     INSTRUCTION_EVERY_N,
     REMINDER_MARKER,
     SELF_CHECK_INSTRUCTION,
+    _MAX_CONFLICT_ITEMS,
+    _MAX_ITEM_CHARS,
     _STATE_MAX_SESSIONS,
 )
 
@@ -192,6 +197,63 @@ class TestFormatContext:
         assert _format_context({"results": [{"unrelated": "field"}]}) is None
 
 
+def _candidate(text="Use Vercel Queue Functions, not a self-hosted worker",
+               author="Ryan Liu", decided_at="2026-07-28T14:03:00Z", similarity=0.63):
+    return {"decision_text": text, "author": author, "decided_at": decided_at,
+            "similarity": similarity, "attribution_verified": True,
+            "hasOpenConflictEdge": False, "team": "Terum"}
+
+
+class TestFormatConflict:
+    def test_formats_neutral_block_with_author_and_date(self):
+        out = _format_conflict({"statement": "s", "candidates": [_candidate()], "error": None})
+        lines = out.splitlines()
+        # Echo-loop guard contract: EVERY line marker-led, or upload.py leaks the rest.
+        assert all(line.startswith(DECISION_MARKER) for line in lines)
+        assert lines[0] == CONFLICT_PREAMBLE
+        # Neutral, judge-don't-assert wording — aligned prompts also surface candidates
+        # (~0.55-0.58 in the 2026-08-01 probes), so the block must never assert a conflict.
+        assert "judge silently" in out
+        assert "may bear" in out
+        assert "do not mention this check" in out
+        assert "(Ryan Liu, 2026-07-28):" in lines[1]
+        assert "Vercel Queue Functions" in lines[1]
+
+    def test_caps_at_top_3_by_similarity(self):
+        cands = [_candidate(text=f"decision {i}", similarity=s)
+                 for i, s in enumerate([0.51, 0.66, 0.58, 0.62, 0.55])]
+        out = _format_conflict({"candidates": cands, "error": None})
+        lines = out.splitlines()
+        assert len(lines) == 1 + _MAX_CONFLICT_ITEMS
+        assert "decision 1" in lines[1]  # 0.66 first
+        assert "decision 3" in lines[2]  # 0.62
+        assert "decision 2" in lines[3]  # 0.58
+        assert "decision 0" not in out and "decision 4" not in out
+
+    def test_error_body_injects_nothing(self):
+        assert _format_conflict({"candidates": [_candidate()], "error": "transient"}) is None
+
+    def test_empty_or_missing_candidates_is_none(self):
+        assert _format_conflict({"candidates": [], "error": None}) is None
+        assert _format_conflict({"error": None}) is None
+        assert _format_conflict(None) is None
+        # candidates present but no usable decision_text -> nothing to show
+        assert _format_conflict({"candidates": [{"author": "x"}], "error": None}) is None
+
+    def test_decision_text_truncated_and_flattened_to_one_line(self):
+        long_text = "first line of a decision\nsecond line " + "x" * 400
+        out = _format_conflict({"candidates": [_candidate(text=long_text)], "error": None})
+        lines = out.splitlines()
+        assert len(lines) == 2  # multi-line decision_text must not spawn unmarked lines
+        flattened = " ".join(long_text.split())
+        assert flattened[:_MAX_ITEM_CHARS] in lines[1]
+        assert flattened[: _MAX_ITEM_CHARS + 1] not in lines[1]
+
+    def test_missing_author_and_date_degrade_gracefully(self):
+        out = _format_conflict({"candidates": [_candidate(author=None, decided_at=None)], "error": None})
+        assert "(unknown, date unknown):" in out
+
+
 class TestInstructionDosing:
     def test_first_and_every_nth_prompt(self, state_file):
         due = [_instruction_due("sess-a") for _ in range(INSTRUCTION_EVERY_N * 2)]
@@ -222,14 +284,14 @@ class TestPromptHook:
     def test_emits_context_and_first_prompt_instruction(self, state_file, monkeypatch, capsys):
         _set_stdin(monkeypatch, json.dumps({"prompt": "add rate limiting to the ingest route", "session_id": "s1"}))
         monkeypatch.setattr(delivery_hooks, "load_config", lambda: CONFIG)
-        posted = {}
+        posted = []
 
         class Resp:
             status_code = 200
             def json(self): return {"results": [{"summary": "use Upstash Redis", "owner": "Teddy"}]}
 
         def fake_post(url, json=None, headers=None, timeout=None):
-            posted.update(url=url, body=json)
+            posted.append({"url": url, "body": json})
             return Resp()
 
         monkeypatch.setattr(delivery_hooks.httpx, "post", fake_post)
@@ -242,8 +304,14 @@ class TestPromptHook:
         assert "Upstash Redis" in ctx and "(Teddy)" in ctx
         assert SELF_CHECK_INSTRUCTION in ctx  # first prompt of the session -> instruction rides along
         assert REMINDER_MARKER in ctx
-        assert posted["url"].endswith("/hooks/retrieve")
-        assert posted["body"] == {"mode": "context", "text": "add rate limiting to the ingest route", "source": "hook"}
+        # Two sequential retrievals per prompt: context, then the conflict lane.
+        assert [p["body"]["mode"] for p in posted] == ["context", "conflict"]
+        for p in posted:
+            assert p["url"].endswith("/hooks/retrieve")
+            assert p["body"]["text"] == "add rate limiting to the ingest route"
+            assert p["body"]["source"] == "hook"
+        # This response shape has no candidates, so no decision block was injected.
+        assert DECISION_MARKER not in ctx
 
     def test_second_prompt_context_only(self, state_file, monkeypatch, capsys):
         monkeypatch.setattr(delivery_hooks, "load_config", lambda: CONFIG)
@@ -304,3 +372,75 @@ class TestPromptHook:
         monkeypatch.setattr(delivery_hooks, "load_config", lambda: CONFIG)
         run_prompt_hook()
         assert capsys.readouterr().out == ""
+
+    @staticmethod
+    def _mode_router(context_result, conflict_result):
+        """fake httpx.post that answers per retrieve mode; a result that is an Exception
+        class/instance is raised instead (simulating a transport error on that lane only)."""
+        def fake_post(url, json=None, headers=None, timeout=None):
+            result = context_result if json["mode"] == "context" else conflict_result
+            if isinstance(result, Exception):
+                raise result
+
+            class Resp:
+                status_code = 200
+                def json(self_inner): return result
+            return Resp()
+        return fake_post
+
+    def test_conflict_candidates_injected_after_context(self, state_file, monkeypatch, capsys):
+        _set_stdin(monkeypatch, json.dumps({"prompt": "switch the queue to a self-hosted worker", "session_id": "c1"}))
+        monkeypatch.setattr(delivery_hooks, "load_config", lambda: CONFIG)
+        monkeypatch.setattr(delivery_hooks.httpx, "post", self._mode_router(
+            {"results": [{"summary": "queue background jobs via QStash", "owner": "Teddy"}]},
+            {"statement": "s", "candidates": [_candidate()], "error": None},
+        ))
+
+        run_prompt_hook()
+
+        ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+        assert "QStash" in ctx
+        assert DECISION_MARKER in ctx and "judge silently" in ctx
+        assert "(Ryan Liu, 2026-07-28):" in ctx
+        assert ctx.index(CONTEXT_MARKER) < ctx.index(DECISION_MARKER)  # context first
+
+    def test_conflict_error_fails_open_context_survives(self, state_file, monkeypatch, capsys):
+        _set_stdin(monkeypatch, json.dumps({"prompt": "a perfectly long prompt here", "session_id": "c2"}))
+        monkeypatch.setattr(delivery_hooks, "load_config", lambda: CONFIG)
+        monkeypatch.setattr(delivery_hooks.httpx, "post", self._mode_router(
+            {"results": [{"summary": "context note"}]},
+            RuntimeError("conflict lane timed out"),
+        ))
+
+        run_prompt_hook()  # must not raise (hook exits 0)
+
+        ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+        assert "context note" in ctx
+        assert DECISION_MARKER not in ctx
+
+    def test_context_error_does_not_kill_conflict_lane(self, state_file, monkeypatch, capsys):
+        _set_stdin(monkeypatch, json.dumps({"prompt": "another perfectly long prompt", "session_id": "c3"}))
+        monkeypatch.setattr(delivery_hooks, "load_config", lambda: CONFIG)
+        monkeypatch.setattr(delivery_hooks.httpx, "post", self._mode_router(
+            RuntimeError("context lane refused"),
+            {"candidates": [_candidate()], "error": None},
+        ))
+
+        run_prompt_hook()
+
+        ctx = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
+        assert CONTEXT_MARKER not in ctx
+        assert DECISION_MARKER in ctx and "Vercel Queue Functions" in ctx
+
+    def test_conflict_empty_candidates_injects_nothing(self, state_file, monkeypatch, capsys):
+        _set_stdin(monkeypatch, json.dumps({"prompt": "an unrelated long enough prompt", "session_id": "c4"}))
+        monkeypatch.setattr(delivery_hooks, "load_config", lambda: CONFIG)
+        monkeypatch.setattr(delivery_hooks.httpx, "post", self._mode_router(
+            {"results": []},
+            {"statement": "s", "candidates": [], "error": None},
+        ))
+
+        run_prompt_hook()
+
+        out = capsys.readouterr().out
+        assert DECISION_MARKER not in out

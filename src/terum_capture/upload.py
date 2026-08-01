@@ -10,7 +10,7 @@ from pathlib import Path
 import httpx
 
 from terum_capture.config import load_config
-from terum_capture.delivery_hooks import CONTEXT_MARKER, REMINDER_MARKER
+from terum_capture.delivery_hooks import CONTEXT_MARKER, DECISION_MARKER, REMINDER_MARKER
 
 TERUM_DIR = Path.home() / ".terum"
 MAX_EVENTS_PER_BATCH = 50
@@ -377,11 +377,16 @@ def _strip_delivery_injection(text: str) -> str:
     The delivery hook (delivery_hooks.py) prepends team context to the session via
     additionalContext; if that text lands inside the captured user prompt, uploading it would
     re-distill the TEAM's knowledge as if this user decided it (wrong attribution, duplicate
-    corpus rows). Every injected line starts with one of the two markers, so the strip is
+    corpus rows). Every injected line starts with one of the three markers, so the strip is
     mechanical: drop a CONTEXT_MARKER line plus its immediately following "- " bullets, and
-    drop any REMINDER_MARKER line. Text without markers passes through untouched.
+    drop any REMINDER_MARKER or DECISION_MARKER line (every line of the decision-check block
+    is marker-led by construction). Text without markers passes through untouched.
     """
-    if CONTEXT_MARKER not in text and REMINDER_MARKER not in text:
+    if (
+        CONTEXT_MARKER not in text
+        and REMINDER_MARKER not in text
+        and DECISION_MARKER not in text
+    ):
         return text
     kept: list[str] = []
     in_context_block = False
@@ -390,7 +395,7 @@ def _strip_delivery_injection(text: str) -> str:
         if stripped.startswith(CONTEXT_MARKER):
             in_context_block = True
             continue
-        if stripped.startswith(REMINDER_MARKER):
+        if stripped.startswith(REMINDER_MARKER) or stripped.startswith(DECISION_MARKER):
             continue
         if in_context_block:
             if stripped.startswith("- "):

@@ -29,6 +29,12 @@ class TestAppendMcpUsage:
         assert "get_standing_decisions" in text
         # draws the line vs. automatic capture so it doesn't read as contradicting the capture block
         assert "pull-only" in text
+        # demo-strength behavioral shape (0.6.0): call BEFORE code, STOP on a genuine conflict,
+        # present who/when/why, and stay silent when nothing genuinely conflicts
+        assert "BEFORE writing any code" in text
+        assert "STOP. Do not write code." in text
+        assert "say nothing about the check" in text
+        assert "build-vs-buy" in text
 
     def test_idempotent_no_duplicate(self, tmp_path, monkeypatch):
         claude_md = tmp_path / ".claude" / "CLAUDE.md"

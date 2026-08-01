@@ -50,15 +50,34 @@ _MAX_ITEM_CHARS = 220
 # Echo-loop guard markers (see module docstring — upload.py strips blocks led by these).
 CONTEXT_MARKER = "[Terum team context]"
 REMINDER_MARKER = "[Terum reminder]"
+DECISION_MARKER = "[Terum decision check]"
 
 INSTRUCTION_EVERY_N = 5
+# Single line by construction: upload.py's strip drops marker-LED lines, so an internal
+# newline would leak the tail of the instruction into the captured prompt.
 SELF_CHECK_INSTRUCTION = (
-    f"{REMINDER_MARKER} As you work: before acting on any non-trivial decision YOU make this "
-    "session (a library, schema, architecture, or destructive/hard-to-reverse choice), state it "
-    "in one sentence and call the check_decision MCP tool with it. Call search_team_knowledge "
-    "when you need what the team already knows, discussed, or decided — the repo alone won't "
-    "have it."
+    f"{REMINDER_MARKER} As you work: before any architecture, library, schema, billing, or "
+    "build-vs-buy decision you make this session — and before scaffolding any new service or "
+    "module — state it in plain language and call the check_decision MCP tool with it, BEFORE "
+    "writing any code. If it returns a standing decision that genuinely conflicts: STOP, do "
+    "not write code — present the conflict (the decision, who made it, when, and the "
+    "reasoning), then ask how to proceed. If no candidate genuinely conflicts, say nothing "
+    "about the check. Call search_team_knowledge when you need what the team already knows, "
+    "discussed, or decided — the repo alone won't have it."
 )
+
+# Conflict-lane preamble — NEUTRAL BY DESIGN. Live probes (2026-08-01) show true conflict
+# prompts score 0.62-0.67 similarity, but ALIGNED prompts (agreeing with a decision) also
+# surface their decision at ~0.55-0.58 — so a candidate is a MAYBE, never a verdict. The
+# wording instructs the model to judge silently, never asserts a conflict exists. One line
+# by construction (same strip rationale as SELF_CHECK_INSTRUCTION).
+CONFLICT_PREAMBLE = (
+    f"{DECISION_MARKER} A standing team decision may bear on this request — judge silently "
+    "whether what the user is asking conflicts with it. If it genuinely conflicts: STOP "
+    "before writing code, surface the decision (who made it, when, why), and ask how to "
+    "proceed. If it aligns or is unrelated, proceed and do not mention this check."
+)
+_MAX_CONFLICT_ITEMS = 3
 
 # Per-session prompt counter for instruction dosing. Insertion-ordered dict, pruned to the
 # newest _STATE_MAX_SESSIONS entries so the file can't grow unbounded.
@@ -145,6 +164,42 @@ def _format_context(output: dict | None) -> str | None:
     )
 
 
+def _format_conflict(output: dict | None) -> str | None:
+    """[Terum decision check] block from a mode="conflict" /hooks/retrieve response.
+
+    Field names pinned against the live conflict shape: candidates[].decision_text/author/
+    decided_at/similarity, plus a top-level `error`. Any error in the body — or no usable
+    candidates — returns None (fail-open, inject nothing). Every emitted line starts with
+    DECISION_MARKER (echo-loop guard contract; upload.py strips these lines in the same
+    commit that introduced the marker).
+    """
+    if not output or output.get("error"):
+        return None
+    candidates = [c for c in (output.get("candidates") or []) if isinstance(c, dict)]
+    if not candidates:
+        return None
+
+    def _sim(cand: dict) -> float:
+        try:
+            return float(cand.get("similarity") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    lines = [CONFLICT_PREAMBLE]
+    for cand in sorted(candidates, key=_sim, reverse=True)[:_MAX_CONFLICT_ITEMS]:
+        # Flatten to ONE line — same rationale as _format_context: a line not led by the
+        # marker would survive upload.py's strip and be re-captured as the user's words.
+        text = " ".join(str(cand.get("decision_text") or "").split())
+        if not text:
+            continue
+        author = str(cand.get("author") or "").strip() or "unknown"
+        decided = str(cand.get("decided_at") or "").strip()[:10] or "date unknown"
+        lines.append(f"{DECISION_MARKER} Decision ({author}, {decided}): {text[:_MAX_ITEM_CHARS]}")
+    if len(lines) == 1:
+        return None  # candidates present but none had usable text
+    return "\n".join(lines)
+
+
 def _instruction_due(session_id: str) -> bool:
     """Advance this session's prompt counter; True on the 1st prompt and every
     INSTRUCTION_EVERY_N-th after. Any state failure -> False (fail-open = inject less)."""
@@ -180,9 +235,16 @@ def run_prompt_hook() -> None:
 
     parts: list[str] = []
     if len(prompt.strip()) >= MIN_PROMPT_CHARS:
+        # Two SEQUENTIAL, INDEPENDENT retrievals: context, then the conflict lane. Each
+        # fails open on its own (_retrieve returns None on any error), so a transient
+        # failure in one never suppresses the other — ~2/9 live calls errored in the
+        # 2026-08-01 probes. Worst case 2 x HOOK_HTTP_TIMEOUT = 16s, under the 30s budget.
         context = _format_context(_retrieve("context", prompt))
         if context:
             parts.append(context)
+        conflict = _format_conflict(_retrieve("conflict", prompt))
+        if conflict:
+            parts.append(conflict)
     if _instruction_due(session_id):
         parts.append(SELF_CHECK_INSTRUCTION)
     _emit("UserPromptSubmit", "\n\n".join(parts) if parts else None)
