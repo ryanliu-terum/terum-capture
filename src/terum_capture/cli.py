@@ -1,13 +1,17 @@
 import sys
 
+from terum_capture.output import die
+
+COMMANDS_LINE = (
+    "Commands: upload, setup, backfill, status, update, setup-hook, logout, mcp, delivery"
+)
+
 
 def main():
     args = sys.argv[1:]
 
     if not args:
-        print("Usage: terum-capture <command>")
-        print("Commands: upload, setup, backfill, status, logout")
-        sys.exit(1)
+        die("Usage: terum-capture <command>", COMMANDS_LINE)
 
     command = args[0]
 
@@ -40,6 +44,8 @@ def main():
         token = None
         use_global = False
         projects: list[str] = []
+        mcp = None
+        delivery = None
         i = 1
         while i < len(args):
             if args[i] == "--url" and i + 1 < len(args):
@@ -54,13 +60,40 @@ def main():
             elif args[i] == "--global":
                 use_global = True
                 i += 1
+            elif args[i] == "--mcp":
+                mcp = True
+                i += 1
+            elif args[i] == "--no-mcp":
+                mcp = False
+                i += 1
+            elif args[i] == "--delivery":
+                delivery = True
+                i += 1
+            elif args[i] == "--no-delivery":
+                delivery = False
+                i += 1
             else:
                 i += 1
-        cmd_setup(api_url=url, token=token, use_global=use_global, projects=projects or None)
+        cmd_setup(
+            api_url=url,
+            token=token,
+            use_global=use_global,
+            projects=projects or None,
+            mcp=mcp,
+            delivery=delivery,
+        )
 
     elif command == "status":
         from terum_capture.commands import cmd_status
         cmd_status()
+
+    elif command == "update":
+        from terum_capture.updater import cmd_update
+        cmd_update()
+
+    elif command == "setup-hook":
+        from terum_capture.commands import cmd_setup_hook
+        cmd_setup_hook()
 
     elif command == "logout":
         from terum_capture.commands import cmd_logout
@@ -74,18 +107,48 @@ def main():
                 i += 1
         cmd_logout(use_global="--global" in args[1:], project=project)
 
+    elif command == "delivery-hook":
+        # Invoked by the Claude Code hook itself (reads the hook payload from stdin), like
+        # `upload`. Not run by hand. `delivery-hook prompt` = UserPromptSubmit.
+        from terum_capture.delivery_hooks import run_prompt_hook
+        event = args[1] if len(args) >= 2 else ""
+        if event == "prompt":
+            run_prompt_hook()
+        else:
+            die("Usage: terum-capture delivery-hook prompt")
+
+    elif command == "delivery":
+        from terum_capture.delivery_hooks import cmd_delivery
+        cmd_delivery(args[1] if len(args) >= 2 else "")
+
+    elif command == "mcp":
+        if len(args) >= 2 and args[1] == "install":
+            from terum_capture.commands import cmd_mcp_install
+            client = "claude"
+            i = 2
+            while i < len(args):
+                if args[i] == "--client":
+                    if i + 1 >= len(args):
+                        die("Error: --client requires a value (claude|cursor).")
+                    client = args[i + 1]
+                    i += 2
+                else:
+                    i += 1
+            if client not in ("claude", "cursor"):
+                die(f"Error: unknown MCP client '{client}'. Use claude or cursor.")
+            cmd_mcp_install(client)
+        else:
+            die("Usage: terum-capture mcp install [--client claude|cursor]")
+
     else:
-        print(f"Unknown command: {command}")
-        print("Commands: upload, setup, backfill, status, logout")
-        sys.exit(1)
+        die(f"Unknown command: {command}", COMMANDS_LINE)
 
 
 def _parse_int(value: str, flag: str) -> int:
     try:
         return int(value)
     except ValueError:
-        print(f"Error: {flag} expects an integer, got {value!r}.")
-        sys.exit(1)
+        die(f"Error: {flag} expects an integer, got {value!r}.")
 
 
 if __name__ == "__main__":

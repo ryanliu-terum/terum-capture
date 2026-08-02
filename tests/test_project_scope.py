@@ -224,3 +224,74 @@ class TestPromptProjectScope:
         monkeypatch.setattr("builtins.input", lambda *_: "a")
         use_global, bases = commands._prompt_project_scope(tmp_path)
         assert bases == [tmp_path]  # deduped to a single row
+
+
+class TestRefreshInstalledHooks:
+    """The drift-repair path, and the one place project scoping could quietly undo itself.
+
+    `_refresh_installed_hooks` backs both `setup-hook` (which `terum-capture update` runs on
+    every upgrade) and the daily self-heal that fires from the Stop hook. Before capture had a
+    scope those callers just rewrote ~/.claude/settings.json unconditionally, because global was
+    the only place a hook could live. Kept that way after this change, an upgrade or a routine
+    background pass would ADD a machine-wide hook to a user who deliberately picked one project
+    — turning capture back on for every repo on the box, with no prompt and nothing said. So
+    refresh-only is a scope guarantee, not a tidiness preference, and is pinned here.
+    """
+
+    def test_refreshes_global_hook_when_present(self, tmp_path, monkeypatch):
+        settings = tmp_path / "settings.json"
+        monkeypatch.setattr(commands, "CLAUDE_SETTINGS", settings)
+        commands._configure_hook(settings)
+
+        # Simulate drift: an old timeout left behind by a package upgrade.
+        data = json.loads(settings.read_text())
+        data["hooks"]["Stop"][0]["hooks"][0]["timeout"] = 15
+        settings.write_text(json.dumps(data))
+
+        assert commands._refresh_installed_hooks() == [settings]
+        healed = json.loads(settings.read_text())
+        assert healed["hooks"]["Stop"][0]["hooks"][0]["timeout"] == commands.HOOK_TIMEOUT
+
+    def test_refreshes_the_project_hook_when_present(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        project_settings, _ = commands._scope_targets(False)
+        commands._configure_hook(project_settings)
+
+        assert commands._refresh_installed_hooks() == [project_settings]
+
+    def test_installs_nothing_when_no_hook_exists(self, tmp_path, monkeypatch):
+        """The guarantee itself: neither scope gains a hook it did not already have."""
+        monkeypatch.chdir(tmp_path)
+        settings = tmp_path / "home-settings.json"
+        monkeypatch.setattr(commands, "CLAUDE_SETTINGS", settings)
+        project_settings, _ = commands._scope_targets(False)
+
+        assert commands._refresh_installed_hooks() == []
+        assert not settings.exists()
+        assert not project_settings.exists()
+
+    def test_project_only_install_is_never_widened_to_global(self, tmp_path, monkeypatch):
+        """The exact regression: a project-scoped user runs `update`, and must NOT come out
+        of it with capture re-armed machine-wide."""
+        monkeypatch.chdir(tmp_path)
+        global_settings = tmp_path / "home-settings.json"
+        monkeypatch.setattr(commands, "CLAUDE_SETTINGS", global_settings)
+        project_settings, _ = commands._scope_targets(False)
+        commands._configure_hook(project_settings)
+
+        assert commands._refresh_installed_hooks() == [project_settings]
+        assert not global_settings.exists()
+
+    def test_daily_self_heal_uses_the_refresh_only_path(self, monkeypatch):
+        """maintenance runs unattended from the Stop hook, so it must go through the same
+        guard rather than calling the installer directly."""
+        import terum_capture.maintenance as maintenance
+
+        calls = []
+        monkeypatch.setattr(commands, "_refresh_installed_hooks", lambda: calls.append(True) or [])
+        monkeypatch.setattr(
+            commands, "_configure_hook",
+            lambda *a, **k: pytest.fail("self-heal must never install a hook"),
+        )
+        maintenance._self_heal_hook()
+        assert calls == [True]

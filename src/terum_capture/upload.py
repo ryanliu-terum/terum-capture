@@ -10,6 +10,7 @@ from pathlib import Path
 import httpx
 
 from terum_capture.config import load_config
+from terum_capture.delivery_hooks import CONTEXT_MARKER, REMINDER_MARKER
 
 TERUM_DIR = Path.home() / ".terum"
 MAX_EVENTS_PER_BATCH = 50
@@ -17,6 +18,9 @@ MAX_EVENTS_PER_BATCH = 50
 # to this ceiling. The live hook's 50-cap never reaches it, so a chunk == one POST there.
 SERVER_MAX_EVENTS = 10000
 HTTP_TIMEOUT = 10.0
+# Best-effort dual-send mirror (e.g. staging) uses a shorter timeout so a hung mirror
+# can never stall the Stop hook — the primary (prod) send has already completed by then.
+MIRROR_TIMEOUT = 5.0
 GIT_TIMEOUT = 5.0
 
 # git remote URL forms we normalize to a canonical "owner/repo":
@@ -127,6 +131,13 @@ def cmd_upload():
         _do_upload()
     except Exception as exc:
         print(f"terum-capture: upload failed: {exc}", file=sys.stderr)
+    # Once-a-day upkeep (self-heal hook config + staleness check), AFTER the upload so it
+    # can never delay or break delivery. Fully self-guarded; swallow anything it throws.
+    try:
+        from terum_capture.maintenance import run_daily_maintenance
+        run_daily_maintenance(load_config())
+    except Exception:
+        pass
     sys.exit(0)
 
 
@@ -144,14 +155,72 @@ def _do_upload():
     )
 
 
-def _read_offset(sidecar: Path) -> int:
-    """The 'already sent up to here' byte offset, or 0 (fresh / unreadable / corrupt)."""
-    if not sidecar.exists():
-        return 0
+def _read_sidecar(path: Path) -> dict:
+    """Load persisted upload state: {"offset": int, "repo": str|None, "tokens": tuple|None}.
+
+    Backward compatible with the pre-bug-416 bare-integer sidecar (parsed as an offset
+    with no cached repo and no token baseline). A missing, empty, torn, or unparseable
+    sidecar resets to offset 0 — a full, safe reprocess, never a false "already sent".
+    ``tokens`` is the 4-tuple (input, cache_creation, cache_read, output) or None.
+    """
+    default = {"offset": 0, "repo": None, "tokens": None}
+    if not path.exists():
+        return default
     try:
-        return int(sidecar.read_text().strip())
-    except (ValueError, OSError):
-        return 0
+        raw = path.read_text().strip()
+    except OSError:
+        return default
+    if not raw:
+        return default
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        try:
+            return {"offset": int(raw), "repo": None, "tokens": None}
+        except ValueError:
+            return default
+    if isinstance(data, bool):
+        return default
+    if isinstance(data, int):
+        return {"offset": data, "repo": None, "tokens": None}
+    if not isinstance(data, dict):
+        return default
+    try:
+        offset = int(data.get("offset", 0))
+    except (ValueError, TypeError):
+        offset = 0
+    repo = data.get("repo")
+    if not isinstance(repo, str) or not repo:
+        repo = None
+    tokens = data.get("tokens")
+    if isinstance(tokens, list) and len(tokens) == 4 and all(isinstance(t, int) for t in tokens):
+        tokens = tuple(tokens)
+    else:
+        tokens = None
+    return {"offset": offset, "repo": repo, "tokens": tokens}
+
+
+def _write_sidecar(path: Path, offset: int, repo: str | None, tokens: tuple | None):
+    """Atomically persist upload state as JSON.
+
+    ``offset`` must only advance after a confirmed 2xx (the anti-data-loss invariant).
+    ``repo`` and ``tokens`` carry no delivery semantics, so they may be cached earlier —
+    writing them with an UNCHANGED offset cannot skip un-sent turns. The write goes
+    through a temp file + os.replace so a kill mid-write can never leave a torn sidecar
+    (a truncated read just resets to offset 0, which is safe).
+    """
+    payload: dict = {"offset": offset}
+    if repo:
+        payload["repo"] = repo
+    if tokens is not None:
+        payload["tokens"] = [int(t) for t in tokens]
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(payload))
+        os.replace(tmp, path)
+    except OSError:
+        pass
 
 
 def process_transcript(
@@ -184,57 +253,92 @@ def process_transcript(
         return ProcessResult("unconfigured")
 
     sidecar = TERUM_DIR / f"sent_{session_id}"
-    last_offset = _read_offset(sidecar)
+    state = _read_sidecar(sidecar)
+    last_offset = state["offset"]
 
     file_size = os.path.getsize(transcript_path)
     if file_size <= last_offset:
         _cleanup_old_sidecars()
         return ProcessResult("skipped")
 
-    tokens = _scan_session_tokens(transcript_path)
-    entries = _read_entries(transcript_path, last_offset)
+    # Read new entries ONCE and derive cumulative session token totals from them,
+    # instead of the prior whole-file token scan PLUS a second read from the offset —
+    # halving file I/O for the expensive, kill-prone offset-0 first upload (bug-416).
+    # Token totals span the whole session, so they are (persisted baseline up to
+    # last_offset) + (delta summed over the new entries):
+    #   - baseline present (new-format sidecar): read only the new bytes.
+    #   - offset 0 (first upload / crash recovery): baseline is 0, read == whole file.
+    #   - legacy bare-int sidecar with offset > 0: no baseline was persisted, so rescan
+    #     the whole file for tokens once (a one-time migration) and read entries from
+    #     the offset; it self-upgrades to the baseline format on the next success.
+    if state["tokens"] is not None:
+        entries = _read_entries(transcript_path, last_offset)
+        delta = _sum_tokens(entries)
+        tokens = tuple(state["tokens"][i] + delta[i] for i in range(4))
+    elif last_offset == 0:
+        entries = _read_entries(transcript_path, 0)
+        tokens = _sum_tokens(entries)
+    else:
+        tokens = _sum_tokens(_read_entries(transcript_path, 0))
+        entries = _read_entries(transcript_path, last_offset)
     new_offset = file_size
 
     title, turns = _parse_turns(entries)
 
+    # Blind-spot digest (2026-07-28 study): fold the dropped tool activity — edited
+    # file paths + is_error Bash failures — into one bounded response-only turn.
+    # Appended AFTER the prose turns with a +1s-bumped timestamp so it sorts last
+    # within this chunk and cannot collide on the server dedup key. Applies to both
+    # live and backfill uploads (this is the shared parsing brain).
+    digest = _extract_activity_digest(entries)
+    if digest is not None:
+        digest_text, digest_ts = digest
+        turns.append(("", digest_text, _bump_timestamp(digest_ts)))
+
     if not turns:
-        _update_sidecar(sidecar, new_offset)
+        # Bytes consumed, nothing to send — advance the confirmed offset and persist
+        # the token baseline so later incremental uploads stay cheap and correct;
+        # carry over any cached repo.
+        _write_sidecar(sidecar, new_offset, state["repo"], tokens)
         _cleanup_old_sidecars()
         return ProcessResult("no_turns")
 
-    # Stable repo identity (bug-294): one git resolution per session, sent on every
-    # event so the backend keys/names projects by repo instead of the raw cwd basename.
-    repo = derive_repo(cwd)
+    # Stable repo identity (bug-294): resolve git AT MOST ONCE per session and cache it
+    # in the sidecar BEFORE the POST (offset unchanged) so a process killed before the
+    # success marker — the bug-416 loss loop — does not re-pay the git spawns on the next
+    # retry. Caching repo carries no delivery semantics, so writing it with an unchanged
+    # offset can never skip un-sent turns.
+    repo = state["repo"]
+    if repo is None:
+        repo = derive_repo(cwd)
+        if repo:
+            _write_sidecar(sidecar, last_offset, repo, state["tokens"])
     selected = turns if max_batch is None else turns[:max_batch]
     events = _build_events(selected, session_id, title, cwd, repo, tokens)
 
-    result = _post_events(config, events, sidecar, new_offset)
+    result = _post_events(config, events, sidecar, new_offset, repo, tokens)
     _cleanup_old_sidecars()
     return result
 
 
-def _scan_session_tokens(transcript_path: str) -> tuple[int, int, int, int]:
-    """Sum session-level token usage across the full transcript (cheap integer scan)."""
+def _sum_tokens(entries: list) -> tuple[int, int, int, int]:
+    """Sum assistant `usage` token totals over already-parsed entries (in-memory, no I/O).
+
+    Summed over whichever entries are passed: the whole session (offset 0) or just the
+    new bytes (an incremental delta added to the persisted baseline).
+    """
     token_input = 0
     token_cache_creation = 0
     token_cache_read = 0
     token_output = 0
-    with open(transcript_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if entry.get("type") == "assistant":
-                usage = entry.get("message", {}).get("usage", {})
-                if usage:
-                    token_input += usage.get("input_tokens", 0)
-                    token_cache_creation += usage.get("cache_creation_input_tokens", 0)
-                    token_cache_read += usage.get("cache_read_input_tokens", 0)
-                    token_output += usage.get("output_tokens", 0)
+    for entry in entries:
+        if entry.get("type") == "assistant":
+            usage = entry.get("message", {}).get("usage", {})
+            if usage:
+                token_input += usage.get("input_tokens", 0)
+                token_cache_creation += usage.get("cache_creation_input_tokens", 0)
+                token_cache_read += usage.get("cache_read_input_tokens", 0)
+                token_output += usage.get("output_tokens", 0)
     return token_input, token_cache_creation, token_cache_read, token_output
 
 
@@ -267,6 +371,37 @@ def _read_entries(transcript_path: str, last_offset: int) -> list:
     return entries
 
 
+def _strip_delivery_injection(text: str) -> str:
+    """Echo-loop guard: remove delivery-hook-injected [Terum ...] blocks from a captured prompt.
+
+    The delivery hook (delivery_hooks.py) prepends team context to the session via
+    additionalContext; if that text lands inside the captured user prompt, uploading it would
+    re-distill the TEAM's knowledge as if this user decided it (wrong attribution, duplicate
+    corpus rows). Every injected line starts with one of the two markers, so the strip is
+    mechanical: drop a CONTEXT_MARKER line plus its immediately following "- " bullets, and
+    drop any REMINDER_MARKER line. Text without markers passes through untouched.
+    """
+    if CONTEXT_MARKER not in text and REMINDER_MARKER not in text:
+        return text
+    kept: list[str] = []
+    in_context_block = False
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith(CONTEXT_MARKER):
+            in_context_block = True
+            continue
+        if stripped.startswith(REMINDER_MARKER):
+            continue
+        if in_context_block:
+            if stripped.startswith("- "):
+                continue
+            in_context_block = False
+            if not stripped:
+                continue  # swallow the blank separator that trailed the injected block
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def _parse_turns(entries: list) -> tuple[str | None, list[tuple[str, str, str | None]]]:
     """Pair user/assistant entries into (prompt, response, timestamp) turns.
 
@@ -293,6 +428,7 @@ def _parse_turns(entries: list) -> tuple[str | None, list[tuple[str, str, str | 
                 continue
             if not isinstance(content, str) or content.startswith("<"):
                 continue
+            content = _strip_delivery_injection(content)
             if len(content.strip()) < 3:
                 continue
             if current_prompt is not None:
@@ -329,6 +465,102 @@ def _parse_turns(entries: list) -> tuple[str | None, list[tuple[str, str, str | 
     return title, turns
 
 
+DIGEST_MAX_FILES = 20
+DIGEST_MAX_FAILURES = 8
+DIGEST_MAX_CHARS = 1200
+_EDIT_TOOLS = {"Edit", "Write", "NotebookEdit", "MultiEdit"}
+# Two tiers: an informative error line beats a bare exit-code line, which beats the first line.
+_ERROR_LINE_RE = re.compile(r"^.*(?:error|Error|FAIL|Traceback|fatal|panic|exception|Exception).*$", re.MULTILINE)
+_EXIT_CODE_LINE_RE = re.compile(r"^.*Exit code [1-9].*$", re.MULTILINE)
+
+
+def _extract_activity_digest(entries: list) -> tuple[str, str | None] | None:
+    """Distill the tool activity _parse_turns drops into ONE bounded synthetic turn.
+
+    The 2026-07-28 capture blind-spot study (9 transcript↔note pairs) found the
+    prose-only capture loses two knowledge classes: which files were actually
+    edited (half never reach the note) and what failed along the way (a
+    `worktree remove → Directory not empty` lesson reached neither prose nor
+    note). This captures exactly those two classes and nothing else — no tool
+    results wholesale, no thinking — as a mechanical, hard-capped digest:
+    Edit/Write file paths + Bash commands whose tool_result came back
+    ``is_error`` (strict flag only; content pattern-matching over-flags greps
+    whose OUTPUT merely contains the word "error").
+
+    Returns (digest_text, last_activity_timestamp) or None when the chunk had
+    no qualifying activity. The caller appends it as a response-only turn so it
+    rides the existing event shape, server dedup, and the distill-side secret
+    scrub unchanged.
+    """
+    edited: list[str] = []
+    seen_files: set[str] = set()
+    failures: list[str] = []
+    tool_use_by_id: dict[str, dict] = {}
+    last_ts: str | None = None
+
+    for entry in entries:
+        ts = entry.get("timestamp")
+        if ts:
+            last_ts = ts
+        content = entry.get("message", {}).get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use":
+                tool_use_by_id[block.get("id")] = block
+                name = block.get("name")
+                inp = block.get("input") or {}
+                if name in _EDIT_TOOLS and inp.get("file_path"):
+                    # keep the tail of the path — repo-relative identity without machine prefixes
+                    tail = "/".join(str(inp["file_path"]).replace("\\", "/").split("/")[-3:])
+                    if tail not in seen_files:
+                        seen_files.add(tail)
+                        edited.append(tail)
+            elif block.get("type") == "tool_result" and block.get("is_error"):
+                src = tool_use_by_id.get(block.get("tool_use_id"))
+                if not src or src.get("name") != "Bash":
+                    continue
+                cmd = str((src.get("input") or {}).get("command", "")).split("\n")[0][:60]
+                raw = block.get("content")
+                text = raw if isinstance(raw, str) else "\n".join(
+                    c.get("text", "") for c in raw if isinstance(c, dict)
+                ) if isinstance(raw, list) else ""
+                m = _ERROR_LINE_RE.search(text) or _EXIT_CODE_LINE_RE.search(text)
+                err = (m.group(0) if m else text.strip().split("\n")[0]).strip()[:160]
+                if cmd and err and len(failures) < DIGEST_MAX_FAILURES * 2:
+                    failures.append(f"`{cmd}` → {err}")
+
+    if not edited and not failures:
+        return None
+
+    parts = ["[Session activity digest — auto-captured]"]
+    if edited:
+        shown = edited[:DIGEST_MAX_FILES]
+        extra = f" (+{len(edited) - len(shown)} more)" if len(edited) > len(shown) else ""
+        parts.append("Edited: " + ", ".join(shown) + extra)
+    if failures:
+        parts.append("Failed commands:")
+        parts.extend(f"- {f}" for f in failures[:DIGEST_MAX_FAILURES])
+    text = "\n".join(parts)[:DIGEST_MAX_CHARS]
+    return text, last_ts
+
+
+def _bump_timestamp(ts: str | None) -> str | None:
+    """Return ts advanced by one second so the digest turn can never collide with a
+    real turn on the server dedup key (user+site+conversation+captured_at)."""
+    if not ts:
+        return None
+    try:
+        from datetime import datetime, timedelta
+
+        parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        return (parsed + timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%S.") + f"{parsed.microsecond // 1000:03d}Z"
+    except ValueError:
+        return ts
+
+
 def _build_events(turns, session_id, title, cwd, repo, tokens) -> list[dict]:
     """Serialize turns into the `claude-code` event shape the ingest route expects."""
     token_input, token_cache_creation, token_cache_read, token_output = tokens
@@ -357,11 +589,12 @@ def _build_events(turns, session_id, title, cwd, repo, tokens) -> list[dict]:
     return events
 
 
-def _post_events(config, events, sidecar, new_offset) -> ProcessResult:
+def _post_events(config, events, sidecar, new_offset, repo, tokens) -> ProcessResult:
     """POST events (chunked to the server's per-request cap) and advance the sidecar.
 
     The sidecar advances ONLY after every chunk returns 2xx (state-persistence-after-
-    success). A 429 is reported distinctly so the backfill caller can back off and retry
+    success), persisting the new offset alongside the cached repo + cumulative token
+    baseline. A 429 is reported distinctly so the backfill caller can back off and retry
     the whole session; any other failure leaves the offset untouched too, so a re-run
     re-sends and server dedup (conversation_id + capturedAt) collapses the overlap.
     """
@@ -381,16 +614,37 @@ def _post_events(config, events, sidecar, new_offset) -> ProcessResult:
             print(f"terum-capture: server returned {resp.status_code}", file=sys.stderr)
             return ProcessResult("failed", events=sent, status_code=resp.status_code)
         sent += len(chunk)
-    _update_sidecar(sidecar, new_offset)
+    _write_sidecar(sidecar, new_offset, repo, tokens)
+    _post_to_mirrors(config, events)
     return ProcessResult("uploaded", events=sent, status_code=200)
 
 
-def _update_sidecar(path: Path, offset: int):
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(str(offset))
-    except OSError:
-        pass
+def _post_to_mirrors(config, events):
+    """Best-effort dual-send: mirror the SAME events to every config['extra_targets'].
+
+    Additive only — runs AFTER the primary (prod) send has succeeded and its sidecar offset
+    is persisted, so a mirror can never affect the primary result, the offset, or delivery
+    guarantees. Every error is swallowed and a short timeout bounds a hung mirror so it
+    cannot stall the Stop hook. Each target is {"api_key": "trm_...", "api_url": ".../api"}.
+    Trade-off: a mirror that is down for a run simply misses those turns (no retry) — fine
+    for a test/staging mirror, since prod remains the source of truth.
+    """
+    for target in config.get("extra_targets") or []:
+        api_url = target.get("api_url")
+        api_key = target.get("api_key")
+        if not api_url or not api_key:
+            continue
+        url = f"{api_url}/ingest/llm-history"
+        headers = {"Authorization": f"Bearer {api_key}"}
+        try:
+            for start in range(0, len(events), SERVER_MAX_EVENTS):
+                chunk = events[start:start + SERVER_MAX_EVENTS]
+                resp = httpx.post(url, json={"events": chunk}, headers=headers, timeout=MIRROR_TIMEOUT)
+                if resp.status_code not in (200, 201):
+                    print(f"terum-capture: mirror {api_url} returned {resp.status_code}", file=sys.stderr)
+                    break
+        except Exception as exc:
+            print(f"terum-capture: mirror {api_url} failed: {exc}", file=sys.stderr)
 
 
 def _cleanup_old_sidecars():

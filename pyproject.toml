@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "terum-capture"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Capture Claude Code sessions into Terum's knowledge pipeline"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -22,7 +22,14 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
+
+# pytest was never a declared dependency, so the 269-test suite only ran where someone happened
+# to have installed it by hand, and CI had no way to know what to install. Declared here so
+# `pip install -e ".[dev]"` is the one documented way to get a working test environment.
+[project.optional-dependencies]
+dev = ["pytest>=8"]
 
 [project.urls]
 Homepage = "https://terum.ai"
@@ -30,6 +37,9 @@ Repository = "https://github.com/ryanliu-terum/terum-capture"
 
 [project.scripts]
 terum-capture = "terum_capture.cli:main"
+
+[tool.hatch.version]
+path = "src/terum_capture/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/terum_capture"]

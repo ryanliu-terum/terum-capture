@@ -1,7 +1,9 @@
 import json
 import os
 import secrets
+import shutil
 import socket
+import subprocess
 import sys
 import time
 import webbrowser
@@ -9,7 +11,9 @@ from pathlib import Path
 
 import httpx
 
+from terum_capture import __version__
 from terum_capture.config import load_config, save_config, delete_config, CallbackServer
+from terum_capture.output import die, err
 
 DEFAULT_API_URL = "https://api.terum.ai/api"
 DASHBOARD_URL = "https://app.terum.ai"
@@ -17,8 +21,16 @@ DASHBOARD_URL = "https://app.terum.ai"
 # (project) scope resolves per-directory targets in _scope_targets().
 CLAUDE_SETTINGS = Path.home() / ".claude" / "settings.json"
 CLAUDE_MD = Path.home() / ".claude" / "CLAUDE.md"
+CLAUDE_JSON = Path.home() / ".claude.json"
+CURSOR_MCP = Path.home() / ".cursor" / "mcp.json"
+MCP_SERVER_NAME = "terum"
 
-HOOK_TIMEOUT = 15
+# 60s (not Claude Code's 15s default): a big session's first upload does a
+# whole-file read + git before the POST; 15s could kill it mid-work, and a
+# marker is only written on success, so the retry re-pays the same cost and the
+# session never captures (bug-416). _configure_hook refreshes installed users to
+# this value on their next `setup`.
+HOOK_TIMEOUT = 60
 
 # Files a project-scoped setup keeps out of version control (personal capture config).
 GITIGNORE_ENTRIES = (".claude/settings.local.json", "CLAUDE.local.md")
@@ -186,6 +198,42 @@ If you forget the summary, the conversation is still captured; the summary just
 makes the captured data richer.
 """
 
+# Idempotency key for the MCP-usage guidance below. Delivery through the Terum MCP server is
+# PULL-ONLY — nothing is injected automatically, so the tools only help if the agent actually
+# reaches for them. Without this instruction the model rarely calls an optional MCP tool, so
+# "in-flow team context" silently never fires. Appended only when MCP is actually wired for
+# Claude Code (see _configure_mcp call sites); Cursor has no ~/.claude/CLAUDE.md.
+MCP_USAGE_HEADER = "## Terum Team Knowledge (MCP)"
+# Invisible in rendered markdown; bounds the managed span so upserts can replace the block
+# without touching anything the user wrote below it. Legacy blocks (pre-marker) are replaced
+# conservatively up to the next "## " heading or EOF.
+MCP_USAGE_END_MARKER = "<!-- /terum-mcp-usage -->"
+
+MCP_USAGE_BLOCK = """
+## Terum Team Knowledge (MCP)
+
+Your team's shared knowledge and standing decisions are reachable through the Terum MCP
+server, via three tools: `search_team_knowledge`, `check_decision`, `get_standing_decisions`.
+Delivery is pull-only — nothing is injected automatically, so these only help the team if you
+actually call them at the right moments:
+
+- Before proposing or making a non-trivial technical decision — an architecture choice, a
+  library / API / schema / auth decision, or a destructive or hard-to-reverse action — call
+  `check_decision` with the specific action you're about to take. It surfaces conflicts with
+  the team's standing decisions and is silent when nothing conflicts.
+- When a question is about what's already been decided, discussed, or figured out, by you OR by
+  a teammate (e.g. "what did we decide about X", "are we still doing Y", the status of ongoing
+  work, a prior finding), call `search_team_knowledge` first. Much of this lives ONLY in the
+  team's shared record, not in your repo, so don't answer from a code or file search alone;
+  check team knowledge before concluding something isn't written down or doesn't exist.
+- Call `get_standing_decisions` to catch up on the team's recent decisions before proposing
+  something new.
+
+This is separate from Terum's automatic session capture, which needs no tool calls: capture
+records your work for the team, while these knowledge tools are yours to call to pull the
+team's context into your work.
+<!-- /terum-mcp-usage -->
+"""
 
 MAX_PICKER_ROWS = 25
 
@@ -291,6 +339,8 @@ def cmd_setup(
     token: str | None = None,
     use_global: bool = False,
     projects: list[str] | None = None,
+    mcp: bool | None = None,
+    delivery: bool | None = None,
 ):
     api_url = api_url or DEFAULT_API_URL
     # Whether a token was passed non-interactively (--token). Captured before
@@ -311,14 +361,16 @@ def cmd_setup(
                 print("Creating a new key will not revoke the existing one.")
                 answer = input("Continue? [y/N] ").strip().lower()
                 if answer != "y":
-                    return
+                    return  # user DECLINED — a cancellation, not a failure. Exit 0 is correct.
         except Exception:
             pass
 
     if not token:
         token = _browser_auth(api_url)
         if not token:
-            return
+            # Auth failed: _browser_auth already reported the specific reason to stderr, so exit
+            # without a second message — but DO exit non-zero (bug-561: this used to exit 0).
+            sys.exit(1)
 
     hostname = socket.gethostname() or "unknown"
     try:
@@ -329,18 +381,14 @@ def cmd_setup(
             timeout=10.0,
         )
     except Exception as exc:
-        print(f"Error: Could not reach {api_url}: {exc}")
-        return
+        die(f"Error: Could not reach {api_url}: {exc}")
 
     if resp.status_code == 409:
-        print("Error: You have 10 active keys. Revoke one first.")
-        return
+        die("Error: You have 10 active keys. Revoke one first.")
     if resp.status_code == 401:
-        print("Error: Token expired or invalid. Run setup again.")
-        return
+        die("Error: Token expired or invalid. Run setup again.")
     if resp.status_code != 201:
-        print(f"Error: Key creation failed (HTTP {resp.status_code}).")
-        return
+        die(f"Error: Key creation failed (HTTP {resp.status_code}).")
 
     data = resp.json()
     api_key = data["key"]
@@ -354,12 +402,10 @@ def cmd_setup(
         )
         if verify.status_code != 200:
             delete_config()
-            print("Error: Round-trip verification failed. Config deleted.")
-            return
+            die("Error: Round-trip verification failed. Config deleted.")
     except Exception:
         delete_config()
-        print("Error: Round-trip verification failed. Config deleted.")
-        return
+        die("Error: Round-trip verification failed. Config deleted.")
 
     # Resolve the capture scope. Explicit flags win and keep non-interactive installs
     # unattended; otherwise an interactive terminal gets the project picker; a piped/CI
@@ -375,6 +421,9 @@ def cmd_setup(
         bases = [Path.cwd()]
 
     installed = _install_scope(use_global, bases)
+
+    _maybe_configure_mcp_interactive(api_key, api_url, mcp)
+    _maybe_install_delivery_interactive(delivery)
 
     prefix = api_key[:8]
     print(f"\nTerum connected! Key: {prefix}...")
@@ -405,6 +454,82 @@ def cmd_setup(
     print("\nNo further setup needed. Start a new Claude Code session to begin capturing.")
 
     _maybe_offer_backfill(interactive=not token_supplied and sys.stdin.isatty())
+
+
+def cmd_setup_hook():
+    """Refresh every MANAGED artifact to this installed package's canonical form.
+
+    Unlike ``setup``, this mints no API key and prompts for nothing. It rewrites the terum
+    Stop-hook entry (command + timeout) in whichever scopes already have one — global and/or
+    this project — refreshes the MCP-usage block wording in ~/.claude/CLAUDE.md IF the block
+    exists, and re-canonicalizes the delivery hook IF it is installed. Refresh-only
+    throughout: it never adds a hook, the nudge block, or the delivery hook to a scope that
+    didn't opt in — ``update`` runs this, and a maintenance command must never flip
+    defaults or widen capture's scope. Safe to run anytime to repair drift.
+    """
+    refreshed = _refresh_installed_hooks()
+    _upsert_mcp_usage_claude_md(add_if_missing=False)
+    _refresh_delivery_hook_if_installed()
+    if not refreshed:
+        # Not a failure (``update`` calls this on every upgrade, including on a machine that
+        # has not run `setup` yet) — so exit 0 and point at the command that installs.
+        print(
+            f"terum-capture {__version__}: no Terum hook found to refresh here. "
+            "Run 'terum-capture setup' to install one."
+        )
+        return
+    print(
+        f"terum-capture {__version__}: Stop hook refreshed (timeout {HOOK_TIMEOUT}s) in "
+        + ", ".join(_display_path(p) for p in refreshed)
+        + ". Restart any open Claude Code sessions to load it."
+    )
+
+
+def _refresh_delivery_hook_if_installed():
+    """Re-canonicalize the delivery hook entry IF the user opted in (refresh-only).
+
+    Lets ``update`` ship delivery-hook command/timeout changes the same way it ships
+    Stop-hook changes, without ever installing the hook on a machine that never ran
+    ``delivery install``. Warn-don't-crash (unreadable settings -> leave untouched)."""
+    from terum_capture.delivery_hooks import _is_our_delivery_group, install_delivery_hooks
+    try:
+        if not CLAUDE_SETTINGS.exists():
+            return
+        settings = json.loads(CLAUDE_SETTINGS.read_text())
+        groups = settings.get("hooks", {}).get("UserPromptSubmit", [])
+        if any(_is_our_delivery_group(g) for g in groups):
+            install_delivery_hooks()
+    except Exception as exc:
+        print(f"Warning: Could not refresh the delivery hook: {exc}")
+
+
+def _maybe_install_delivery_interactive(choice: bool | None) -> None:
+    """The opt-in delivery prompt at the end of `cmd_setup` (default-YES on a TTY).
+
+    Same tri-state contract as _maybe_configure_mcp_interactive: None -> ask on a TTY,
+    skip silently otherwise; True -> forced yes (--delivery); False -> forced skip
+    (--no-delivery). Consent lives HERE, at setup time, deliberately: `update` never
+    installs the hook (a maintenance command must not flip a machine's defaults)."""
+    if choice is False:
+        return
+
+    if choice is None:
+        if not sys.stdin.isatty():
+            return
+        try:
+            answer = input(
+                "Also inject relevant team knowledge into each Claude Code prompt "
+                "(in-flow delivery; fail-open, removable with 'terum-capture delivery "
+                "uninstall')? [Y/n] "
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return
+        if answer in ("n", "no"):
+            return
+
+    from terum_capture.delivery_hooks import install_delivery_hooks
+    install_delivery_hooks()
+    print("Delivery hook installed — each prompt now arrives with relevant team context.")
 
 
 def _maybe_offer_backfill(interactive: bool):
@@ -536,6 +661,29 @@ def _configure_hook(settings_path: Path):
         print(f"Warning: Could not configure hook: {exc}")
 
 
+def _refresh_installed_hooks() -> list[Path]:
+    """Re-apply the canonical Stop entry everywhere a terum hook is ALREADY installed.
+
+    Refresh-only, and that restriction is what project scoping makes load-bearing.
+    `setup-hook` and the daily self-heal are drift-REPAIR paths: before capture had a scope
+    they could rewrite ~/.claude/settings.json unconditionally, because global was the only
+    place a hook could live. Doing that now would hand a machine-wide hook to someone who
+    deliberately chose a per-project one — `terum-capture update` would silently re-arm
+    capture for every project on the box. So each scope is refreshed only if it already has
+    our hook, and neither is ever created here; installing is `setup`'s job alone.
+
+    Checks both scopes because either can hold the hook: global, plus the project the
+    command is being run from (for the self-heal that is the session's own project, since
+    Claude Code runs a Stop hook with the project as cwd). Returns the paths refreshed.
+    """
+    refreshed: list[Path] = []
+    for path in (CLAUDE_SETTINGS, _scope_targets(False)[0]):
+        if path not in refreshed and _settings_has_our_hook(path):
+            _configure_hook(path)
+            refreshed.append(path)
+    return refreshed
+
+
 def _append_claude_md(claude_md_path: Path):
     try:
         claude_md_path.parent.mkdir(parents=True, exist_ok=True)
@@ -552,6 +700,186 @@ def _append_claude_md(claude_md_path: Path):
             f.write(CLAUDE_MD_BLOCK)
     except Exception as exc:
         print(f"Warning: Could not update CLAUDE.md: {exc}")
+
+
+def _upsert_mcp_usage_claude_md(add_if_missing: bool = True):
+    """Install or refresh the MANAGED MCP-usage block in ~/.claude/CLAUDE.md.
+
+    The block spans MCP_USAGE_HEADER .. MCP_USAGE_END_MARKER and is replaced wholesale with
+    this package's current wording, so shipped nudge improvements reach existing installs on
+    `update` (via setup-hook) instead of fossilizing per-machine. Everything outside the span
+    is preserved. A legacy block without the end marker is replaced up to the next "## "
+    heading or EOF — the conservative bound. `add_if_missing=False` is the refresh-only mode
+    (setup-hook/update): a machine that never wired MCP is never given the block as a side
+    effect. Warn-don't-crash, mirroring _append_claude_md."""
+    try:
+        CLAUDE_MD.parent.mkdir(parents=True, exist_ok=True)
+        existing = CLAUDE_MD.read_text() if CLAUDE_MD.exists() else ""
+        lines = existing.split("\n")
+        start = next((i for i, l in enumerate(lines) if l.strip() == MCP_USAGE_HEADER), None)
+
+        if start is None:
+            if not add_if_missing:
+                return
+            with open(CLAUDE_MD, "a") as f:
+                if existing and not existing.endswith("\n"):
+                    f.write("\n")
+                f.write(MCP_USAGE_BLOCK)
+            return
+
+        end = next((i for i in range(start + 1, len(lines))
+                    if lines[i].strip() == MCP_USAGE_END_MARKER), None)
+        if end is None:  # legacy block: no marker -> stop before the next section heading
+            nxt = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), None)
+            end = (nxt - 1) if nxt is not None else (len(lines) - 1)
+
+        block_lines = MCP_USAGE_BLOCK.strip("\n").split("\n")
+        tail = lines[end + 1:]
+        spacer = [""] if tail and tail[0].strip() else []
+        new_lines = lines[:start] + block_lines + spacer + tail
+        out = "\n".join(new_lines)
+        if not out.endswith("\n"):
+            out += "\n"
+        CLAUDE_MD.write_text(out)
+    except Exception as exc:
+        print(f"Warning: Could not update CLAUDE.md with MCP guidance: {exc}")
+
+
+def _maybe_configure_mcp_interactive(api_key: str, api_url: str, choice: bool | None) -> None:
+    """Tier 1: the opt-in MCP prompt at the end of `cmd_setup`.
+
+    `choice` is a tri-state (wired in from CLI flags, see cli.py):
+      None  -> interactive: ask only if running on a TTY, skip silently otherwise.
+      True  -> forced yes (headless opt-in via --mcp): install without prompting.
+      False -> forced skip: do nothing.
+    Never raises — a headless EOFError/KeyboardInterrupt on input() is treated as skip.
+    """
+    if choice is False:
+        return
+
+    if choice is None:
+        if not sys.stdin.isatty():
+            return
+        try:
+            answer = input(
+                "Also connect Claude Code to your team's shared decisions & "
+                "conflict-checks (read-only)? [Y/n] "
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return
+        if answer in ("n", "no"):
+            return
+
+    result = _configure_mcp(api_key, api_url, client="claude")
+    if result == "installed":
+        _upsert_mcp_usage_claude_md()
+        print("MCP connected — your agent can now pull team decisions & run conflict checks.")
+    elif result == "already":
+        _upsert_mcp_usage_claude_md()
+        print("MCP already configured — left it as-is.")
+    else:
+        print("Could not auto-configure MCP. Run 'terum-capture mcp install' later.")
+
+
+def cmd_mcp_install(client: str = "claude"):
+    config = load_config()
+    if not config or not config.get("api_key"):
+        die("Not configured. Run: terum-capture setup")
+
+    result = _configure_mcp(config["api_key"], config.get("api_url", DEFAULT_API_URL), client=client)
+
+    label = "Cursor" if client == "cursor" else "Claude Code"
+    # The usage guidance lives in ~/.claude/CLAUDE.md — Claude Code only (Cursor has no such file).
+    if client == "claude" and result in ("installed", "already"):
+        _upsert_mcp_usage_claude_md()
+    if result == "installed":
+        print(f"MCP connected for {label}.")
+    elif result == "already":
+        print(f"MCP already configured for {label} — left it as-is.")
+    else:
+        die(f"Could not configure MCP for {label}.")
+
+
+def _configure_mcp(api_key: str, api_url: str, client: str = "claude") -> str:
+    """Wire an MCP server named "terum" pointing at {api_url}/mcp, authed with api_key.
+    Returns one of: "installed" | "already" | "failed". Never raises."""
+    mcp_url = f"{api_url.rstrip('/')}/mcp"
+
+    if client == "claude":
+        return _configure_mcp_claude(api_key, mcp_url)
+    if client == "cursor":
+        return _configure_mcp_cursor(api_key, mcp_url)
+
+    # err(), not die(): this function's contract is to return a "failed" sentinel and never raise,
+    # so the caller owns the exit. Without this the specific reason went to stdout while the
+    # caller's generic "Could not configure MCP" went to stderr — one failure split across two
+    # streams. Unreachable via the CLI (cli.py validates the client first); defensive for
+    # programmatic callers.
+    err(f"Error: unknown MCP client '{client}'.")
+    return "failed"
+
+
+def _configure_mcp_claude(api_key: str, mcp_url: str) -> str:
+    existing_config, parseable = _read_json_config(CLAUDE_JSON)
+    existing_mcp_servers = existing_config.get("mcpServers") if isinstance(existing_config, dict) else None
+    if parseable and isinstance(existing_mcp_servers, dict) and MCP_SERVER_NAME in existing_mcp_servers:
+        return "already"
+
+    if shutil.which("claude"):
+        try:
+            result = subprocess.run(
+                ["claude", "mcp", "add", "--transport", "http", MCP_SERVER_NAME, mcp_url,
+                 "--header", f"Authorization: Bearer {api_key}", "--scope", "user"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if result.returncode == 0:
+                return "installed"
+        except Exception:
+            pass
+
+    entry = {"type": "http", "url": mcp_url, "headers": {"Authorization": f"Bearer {api_key}"}}
+    return _write_mcp_entry(CLAUDE_JSON, entry)
+
+
+def _configure_mcp_cursor(api_key: str, mcp_url: str) -> str:
+    entry = {"url": mcp_url, "headers": {"Authorization": f"Bearer {api_key}"}}
+    return _write_mcp_entry(CURSOR_MCP, entry)
+
+
+def _read_json_config(path: Path) -> tuple[dict, bool]:
+    """Returns (config_dict, parseable). parseable=False means the file exists but is
+    not valid JSON — callers must not overwrite it in that case."""
+    if not path.exists():
+        return {}, True
+    try:
+        return json.loads(path.read_text()), True
+    except Exception:
+        return {}, False
+
+
+def _write_mcp_entry(path: Path, entry: dict) -> str:
+    try:
+        did_exist = path.exists()
+        config, parseable = _read_json_config(path)
+        if not parseable:
+            raise ValueError(f"{path} exists but is not valid JSON")
+
+        mcp_servers = config.get("mcpServers")
+        if not isinstance(mcp_servers, dict):
+            mcp_servers = {}
+            config["mcpServers"] = mcp_servers
+        if MCP_SERVER_NAME in mcp_servers:
+            return "already"
+
+        mcp_servers[MCP_SERVER_NAME] = entry
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(config, indent=2) + "\n")
+        if not did_exist and sys.platform != "win32":
+            os.chmod(path, 0o600)
+        return "installed"
+    except Exception as exc:
+        print(f"Warning: Could not configure MCP: {exc}")
+        return "failed"
 
 
 def _remove_hook(settings_path: Path) -> bool:
@@ -596,9 +924,17 @@ def cmd_status():
         if resp.status_code == 200:
             data = resp.json()
             print(f"Status: connected")
+            print(f"Version: {__version__}")
             print(f"Name: {data.get('name', 'unknown')}")
             if data.get("last_used_at"):
                 print(f"Last used: {data['last_used_at']}")
+            from terum_capture.maintenance import read_update_available
+            pending = read_update_available()
+            if pending:
+                print(
+                    f"Update available: {pending} — run 'terum-capture update' "
+                    f"(you have {__version__})."
+                )
         else:
             print(f"Status: invalid or revoked (HTTP {resp.status_code})")
             sys.exit(1)

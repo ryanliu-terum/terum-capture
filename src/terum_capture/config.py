@@ -5,6 +5,8 @@ import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
+from terum_capture.output import err
+
 CONFIG_DIR = Path.home() / ".terum"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
@@ -91,7 +93,7 @@ class CallbackServer:
             except OSError:
                 continue
         else:
-            print("Error: Could not bind to ports 19284-19286.")
+            err("Error: Could not bind to ports 19284-19286.")
             return None
         _CallbackHandler.result = None
         self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
@@ -104,13 +106,13 @@ class CallbackServer:
         self._httpd.shutdown()
         result = _CallbackHandler.result
         if result is None:
-            print("Setup timed out. Run 'terum-capture setup' to try again.")
+            err("Setup timed out. Run 'terum-capture setup' to try again.")
             return None
         if result.get("state") != expected_state:
-            print("Error: State mismatch — possible CSRF. Run 'terum-capture setup' to try again.")
+            err("Error: State mismatch — possible CSRF. Run 'terum-capture setup' to try again.")
             return None
         token = result.get("token", "")
         if not token:
-            print("Error: No token received. Run 'terum-capture setup' to try again.")
+            err("Error: No token received. Run 'terum-capture setup' to try again.")
             return None
         return result

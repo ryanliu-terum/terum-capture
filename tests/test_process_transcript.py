@@ -173,9 +173,9 @@ class TestStatusTaxonomy:
                 path = _write_transcript(tmp, self._single())
                 result = upload.process_transcript(path, "s", "/c", max_batch=None)
                 size = os.path.getsize(path)
-                offset = (td / "sent_s").read_text().strip()
+                state = json.loads((td / "sent_s").read_text())
         assert result.status == "uploaded"
-        assert offset == str(size)
+        assert state["offset"] == size
 
     def test_429_returns_rate_limited_and_no_advance(self):
         with _harness(post_codes=(429,)) as (post, td):
