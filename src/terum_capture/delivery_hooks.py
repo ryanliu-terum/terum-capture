@@ -141,8 +141,11 @@ def _format_context(output: dict | None) -> str | None:
     SearchKnowledgeOutput shape (Terum-MVP lib/mcp/search.ts): results[].summary/topic/owner."""
     if not output:
         return None
+    results = output.get("results")
+    if not isinstance(results, list):
+        return None  # bug-594: a truthy non-list (e.g. {"results": 1}) must fail open, not raise
     lines: list[str] = []
-    for item in (output.get("results") or [])[:_MAX_ITEMS]:
+    for item in results[:_MAX_ITEMS]:
         if not isinstance(item, dict):
             continue
         # Flatten to ONE line: prod summaries are multi-line markdown, and a bullet spanning
@@ -175,7 +178,10 @@ def _format_conflict(output: dict | None) -> str | None:
     """
     if not output or output.get("error"):
         return None
-    candidates = [c for c in (output.get("candidates") or []) if isinstance(c, dict)]
+    raw = output.get("candidates")
+    if not isinstance(raw, list):
+        return None  # bug-594: a truthy non-list (e.g. {"candidates": 1}) must fail open, not raise
+    candidates = [c for c in raw if isinstance(c, dict)]
     if not candidates:
         return None
 
@@ -192,8 +198,12 @@ def _format_conflict(output: dict | None) -> str | None:
         text = " ".join(str(cand.get("decision_text") or "").split())
         if not text:
             continue
-        author = str(cand.get("author") or "").strip() or "unknown"
-        decided = str(cand.get("decided_at") or "").strip()[:10] or "date unknown"
+        # Flattened like decision_text (bug-593): .strip() alone keeps INTERIOR newlines, and
+        # an embedded newline in either field would put part of this entry on a physical line
+        # not led by the marker — which upload.py's strip would then keep and upload as the
+        # user's own words.
+        author = " ".join(str(cand.get("author") or "").split()) or "unknown"
+        decided = " ".join(str(cand.get("decided_at") or "").split())[:10] or "date unknown"
         lines.append(f"{DECISION_MARKER} Decision ({author}, {decided}): {text[:_MAX_ITEM_CHARS]}")
     if len(lines) == 1:
         return None  # candidates present but none had usable text
@@ -225,29 +235,40 @@ def _instruction_due(session_id: str) -> bool:
 
 
 def run_prompt_hook() -> None:
-    """UserPromptSubmit entry point (invoked as `... delivery-hook prompt`)."""
-    config = load_config()
-    if not config or not config.get("api_key") or not config.get("api_url"):
-        return  # not set up -> nothing to retrieve AND the MCP tools aren't wired; stay silent
-    payload = _read_stdin_json()
-    prompt = str(payload.get("prompt") or payload.get("user_prompt") or "")
-    session_id = str(payload.get("session_id") or "")
+    """UserPromptSubmit entry point (invoked as `... delivery-hook prompt`).
 
-    parts: list[str] = []
-    if len(prompt.strip()) >= MIN_PROMPT_CHARS:
-        # Two SEQUENTIAL, INDEPENDENT retrievals: context, then the conflict lane. Each
-        # fails open on its own (_retrieve returns None on any error), so a transient
-        # failure in one never suppresses the other — ~2/9 live calls errored in the
-        # 2026-08-01 probes. Worst case 2 x HOOK_HTTP_TIMEOUT = 16s, under the 30s budget.
-        context = _format_context(_retrieve("context", prompt))
-        if context:
-            parts.append(context)
-        conflict = _format_conflict(_retrieve("conflict", prompt))
-        if conflict:
-            parts.append(conflict)
-    if _instruction_due(session_id):
-        parts.append(SELF_CHECK_INSTRUCTION)
-    _emit("UserPromptSubmit", "\n\n".join(parts) if parts else None)
+    The try/except makes the module's FAIL-OPEN guarantee structural rather than
+    per-helper (bug-594): any unexpected defect in a helper degrades to injecting
+    nothing, mirroring cmd_upload's guard around _do_upload.
+    """
+    try:
+        config = load_config()
+        if not config or not config.get("api_key") or not config.get("api_url"):
+            return  # not set up -> nothing to retrieve AND the MCP tools aren't wired; stay silent
+        payload = _read_stdin_json()
+        prompt = str(payload.get("prompt") or payload.get("user_prompt") or "")
+        session_id = str(payload.get("session_id") or "")
+
+        parts: list[str] = []
+        if len(prompt.strip()) >= MIN_PROMPT_CHARS:
+            # Two SEQUENTIAL, INDEPENDENT retrievals: context, then the conflict lane. Each
+            # fails open on its own (_retrieve returns None on any error), so a transient
+            # failure in one never suppresses the other — ~2/9 live calls errored in the
+            # 2026-08-01 probes. NOTE the timeout is per-operation (httpx float timeout =
+            # connect/read/write each), not wall-clock, and prod mode="conflict" latency was
+            # measured at 7.6-8.9s vs the 8.0s budget — the conflict lane frequently times
+            # out and injects nothing (bug-592, open; fix is a latency/timeout design call).
+            context = _format_context(_retrieve("context", prompt))
+            if context:
+                parts.append(context)
+            conflict = _format_conflict(_retrieve("conflict", prompt))
+            if conflict:
+                parts.append(conflict)
+        if _instruction_due(session_id):
+            parts.append(SELF_CHECK_INSTRUCTION)
+        _emit("UserPromptSubmit", "\n\n".join(parts) if parts else None)
+    except Exception as exc:  # fail-open: a delivery hook must never break the user's session
+        print(f"terum-capture: delivery hook degraded (injected nothing): {exc}", file=sys.stderr)
 
 
 # --- install / uninstall in ~/.claude/settings.json -------------------------------------------
