@@ -8,6 +8,7 @@ every 5th, session-keyed). Live hook I/O is not exercised (that's the E2E pass).
 """
 import io
 import json
+import time
 
 import pytest
 
@@ -322,14 +323,37 @@ class TestPromptHook:
         assert "Upstash Redis" in ctx and "(Teddy)" in ctx
         assert SELF_CHECK_INSTRUCTION in ctx  # first prompt of the session -> instruction rides along
         assert REMINDER_MARKER in ctx
-        # Two sequential retrievals per prompt: context, then the conflict lane.
-        assert [p["body"]["mode"] for p in posted] == ["context", "conflict"]
+        # Two retrievals per prompt — context and conflict lanes, run in PARALLEL since the
+        # D1/bug-592 fix, so arrival order is nondeterministic; assert the pair, not the order.
+        assert sorted(p["body"]["mode"] for p in posted) == ["conflict", "context"]
         for p in posted:
             assert p["url"].endswith("/hooks/retrieve")
             assert p["body"]["text"] == "add rate limiting to the ingest route"
             assert p["body"]["source"] == "hook"
         # This response shape has no candidates, so no decision block was injected.
         assert DECISION_MARKER not in ctx
+
+    def test_retrieval_lanes_run_in_parallel(self, state_file, monkeypatch, capsys):
+        """D1/bug-592 regression: the two lanes must overlap, not stack their latencies —
+        sequential lanes were the reason the conflict lane paid double the round-trip."""
+        _set_stdin(monkeypatch, json.dumps({"prompt": "a prompt long enough to retrieve", "session_id": "s-par"}))
+        monkeypatch.setattr(delivery_hooks, "load_config", lambda: CONFIG)
+
+        class Resp:
+            status_code = 200
+            def json(self): return {"results": []}
+
+        def slow_post(url, json=None, headers=None, timeout=None):
+            time.sleep(0.3)
+            return Resp()
+
+        monkeypatch.setattr(delivery_hooks.httpx, "post", slow_post)
+
+        start = time.monotonic()
+        run_prompt_hook()
+        elapsed = time.monotonic() - start
+        # Two 0.3s lanes: sequential >= 0.6s, parallel ~0.3s. 0.5 leaves slack for CI jitter.
+        assert elapsed < 0.5
 
     def test_second_prompt_context_only(self, state_file, monkeypatch, capsys):
         monkeypatch.setattr(delivery_hooks, "load_config", lambda: CONFIG)

@@ -27,6 +27,7 @@ and you must change upload.py's strip in the same commit.
 """
 import json
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import httpx
@@ -35,7 +36,11 @@ from terum_capture.config import CONFIG_DIR, load_config
 from terum_capture.output import die
 
 # Under Claude Code's 30s UserPromptSubmit budget with margin; fail-open past it (inject nothing).
-HOOK_HTTP_TIMEOUT = 8.0
+# 15.0 is decision-walk 2026-08-02 D1 (bug-592): prod mode="conflict" answers in 7.6-8.9s, so the
+# old 8.0 budget meant the conflict lane timed out and NEVER fired end-to-end. httpx float timeout
+# is per-operation (connect/read/write each), not wall-clock; the installed hook's 30s entry and
+# Claude Code's own budget are the hard backstop, and a killed hook still fails open.
+HOOK_HTTP_TIMEOUT = 15.0
 
 # Substring that identifies our delivery-hook command in settings.json, for idempotent install/remove.
 DELIVERY_HOOK_MARKER = "terum_capture delivery-hook"
@@ -251,17 +256,19 @@ def run_prompt_hook() -> None:
 
         parts: list[str] = []
         if len(prompt.strip()) >= MIN_PROMPT_CHARS:
-            # Two SEQUENTIAL, INDEPENDENT retrievals: context, then the conflict lane. Each
-            # fails open on its own (_retrieve returns None on any error), so a transient
-            # failure in one never suppresses the other — ~2/9 live calls errored in the
-            # 2026-08-01 probes. NOTE the timeout is per-operation (httpx float timeout =
-            # connect/read/write each), not wall-clock, and prod mode="conflict" latency was
-            # measured at 7.6-8.9s vs the 8.0s budget — the conflict lane frequently times
-            # out and injects nothing (bug-592, open; fix is a latency/timeout design call).
-            context = _format_context(_retrieve("context", prompt))
+            # Two PARALLEL, INDEPENDENT retrievals: the context and conflict lanes (decision-walk
+            # 2026-08-02 D1, bug-592 — sequential lanes stacked their latencies, so the prompt
+            # paid both round-trips back to back). Each still fails open on its own (_retrieve
+            # returns None on any error, including a timeout), so a transient failure in one
+            # never suppresses the other — ~2/9 live calls errored in the 2026-08-01 probes.
+            # Injection order stays context-then-conflict regardless of which lane answers first.
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                context_future = pool.submit(_retrieve, "context", prompt)
+                conflict_future = pool.submit(_retrieve, "conflict", prompt)
+                context = _format_context(context_future.result())
+                conflict = _format_conflict(conflict_future.result())
             if context:
                 parts.append(context)
-            conflict = _format_conflict(_retrieve("conflict", prompt))
             if conflict:
                 parts.append(conflict)
         if _instruction_due(session_id):
