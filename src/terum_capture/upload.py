@@ -9,6 +9,7 @@ from pathlib import Path
 
 import httpx
 
+from terum_capture import __version__
 from terum_capture.config import load_config
 from terum_capture.delivery_hooks import CONTEXT_MARKER, DECISION_MARKER, REMINDER_MARKER
 
@@ -135,7 +136,20 @@ def cmd_upload():
     # can never delay or break delivery. Fully self-guarded; swallow anything it throws.
     try:
         from terum_capture.maintenance import run_daily_maintenance
-        run_daily_maintenance(load_config())
+        pending = run_daily_maintenance(load_config())
+        if pending:
+            # Claude Code renders a top-level `systemMessage` from hook stdout JSON directly
+            # to the USER (stderr on an exit-0 hook is swallowed, which made the old nag
+            # invisible). Dosed to once per check interval by run_daily_maintenance's return
+            # (the persisted marker would fire every assistant turn). This print must stay
+            # the ONLY stdout in the hook path — any other stdout text breaks the JSON parse
+            # and the message is silently dropped; everything else here writes to stderr.
+            print(json.dumps({
+                "systemMessage": (
+                    f"terum-capture: a newer version ({pending}) is available — "
+                    f"run 'terum-capture update' (you have {__version__})."
+                )
+            }))
     except Exception:
         pass
     sys.exit(0)

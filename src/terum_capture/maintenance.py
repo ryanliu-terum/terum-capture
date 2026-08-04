@@ -84,13 +84,14 @@ def _self_heal_hook() -> None:
         pass
 
 
-def _check_latest_version(config: dict) -> None:
+def _check_latest_version(config: dict) -> str | None:
+    """Returns the newer version string when we are behind, else None (incl. every failure)."""
     if (
         not config
         or not config.get("api_url")
         or not config.get("api_key", "").startswith("trm_")
     ):
-        return
+        return None
     try:
         resp = httpx.get(
             f"{config['api_url']}/capture/latest-version",
@@ -101,13 +102,13 @@ def _check_latest_version(config: dict) -> None:
             timeout=CHECK_TIMEOUT,
         )
     except Exception:
-        return  # offline / DNS / timeout -> fail open, no nag
+        return None  # offline / DNS / timeout -> fail open, no nag
     if resp.status_code != 200:
-        return  # endpoint not deployed yet (404) or transient -> fail open
+        return None  # endpoint not deployed yet (404) or transient -> fail open
     try:
         latest = str(resp.json().get("version", "")).strip()
     except Exception:
-        return
+        return None
     if is_newer(latest, __version__):
         try:
             UPDATE_MARKER.write_text(latest)
@@ -118,24 +119,33 @@ def _check_latest_version(config: dict) -> None:
             f"run 'terum-capture update' (you have {__version__}).",
             file=sys.stderr,
         )
-    else:
-        # We're current — clear any stale marker so `status` stops nagging.
-        try:
-            UPDATE_MARKER.unlink(missing_ok=True)
-        except OSError:
-            pass
+        return latest
+    # We're current — clear any stale marker so `status` stops nagging.
+    try:
+        UPDATE_MARKER.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return None
 
 
-def run_daily_maintenance(config: dict | None) -> None:
-    """Best-effort; never raises. Call AFTER the upload, guarded by the caller's try too."""
+def run_daily_maintenance(config: dict | None) -> str | None:
+    """Best-effort; never raises. Call AFTER the upload, guarded by the caller's try too.
+
+    Returns the newer version string when THIS run's staleness check found one, else None —
+    the Stop hook uses that to surface a user-visible nag (systemMessage) at most once per
+    check interval. Deliberately NOT the persisted marker: the marker outlives the check by
+    up to a day, and the Stop hook fires on every assistant turn, so keying the nag off the
+    marker would print it every turn (wallpaper, the same failure mode INSTRUCTION_EVERY_N
+    exists to avoid).
+    """
     try:
         now = time.time()
         if not _due(now):
-            return
+            return None
         # Stamp BEFORE the work so a hard-down server or a slow check can never make this
         # run every turn — at most one attempt per interval regardless of outcome.
         _touch_stamp(now)
         _self_heal_hook()
-        _check_latest_version(config)
+        return _check_latest_version(config)
     except Exception:
-        pass
+        return None

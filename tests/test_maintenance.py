@@ -109,3 +109,38 @@ class TestRunDailyMaintenance:
             m.run_daily_maintenance(None)
         heal.assert_called_once()          # self-heal runs even with no API key
         httpx_mock.get.assert_not_called()  # but no server call without config
+
+
+class TestReturnedPendingVersion:
+    """run_daily_maintenance's return feeds the Stop hook's user-visible systemMessage nag —
+    it must be the version ONLY when this run's check found one (once per interval), never
+    the persisted marker (which would fire on every assistant turn)."""
+
+    def _config(self):
+        return {"api_url": "https://api.terum.ai/api", "api_key": "trm_abc123"}
+
+    def test_returns_version_when_behind(self, tmp_terum):
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = {"version": "9.9.9"}
+        with patch.object(m, "_self_heal_hook"), patch.object(m, "httpx") as httpx_mock:
+            httpx_mock.get.return_value = resp
+            assert m.run_daily_maintenance(self._config()) == "9.9.9"
+
+    def test_returns_none_when_current(self, tmp_terum):
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = {"version": __version__}
+        with patch.object(m, "_self_heal_hook"), patch.object(m, "httpx") as httpx_mock:
+            httpx_mock.get.return_value = resp
+            assert m.run_daily_maintenance(self._config()) is None
+
+    def test_returns_none_when_not_due_even_with_marker(self, tmp_terum):
+        (tmp_terum / ".update_available").write_text("9.9.9")  # stale marker present
+        m._touch_stamp(time.time())  # but the check is throttled
+        with patch.object(m, "_self_heal_hook"), patch.object(m, "httpx") as httpx_mock:
+            assert m.run_daily_maintenance(self._config()) is None
+        httpx_mock.get.assert_not_called()
+
+    def test_returns_none_on_failure(self, tmp_terum):
+        with patch.object(m, "_self_heal_hook"), patch.object(m, "httpx") as httpx_mock:
+            httpx_mock.get.side_effect = Exception("offline")
+            assert m.run_daily_maintenance(self._config()) is None
