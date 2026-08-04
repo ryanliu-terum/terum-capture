@@ -275,3 +275,38 @@ def _parse_with_title(entries):
 
     turns = [(p, r, t) for p, r, t in turns if len(p) + len(r) >= 10]
     return title, turns
+
+
+class TestStopHookSystemMessage:
+    """The user-visible update nag: cmd_upload must emit a single pure-JSON object with a
+    top-level systemMessage on stdout when (and only when) this run's daily check found a
+    newer version. Any other stdout text would break Claude Code's JSON parse and silently
+    drop the message — stdout purity IS the contract."""
+
+    def _run(self, pending, capsys):
+        import terum_capture.upload as u
+        with patch.object(u, "_do_upload"), \
+             patch("terum_capture.maintenance.run_daily_maintenance", return_value=pending), \
+             pytest.raises(SystemExit) as exc:
+            u.cmd_upload()
+        assert exc.value.code == 0
+        return capsys.readouterr()
+
+    def test_emits_pure_json_system_message_when_update_pending(self, capsys):
+        out = self._run("9.9.9", capsys).out
+        parsed = json.loads(out)  # the WHOLE stdout must parse — no stray text allowed
+        assert "9.9.9" in parsed["systemMessage"]
+        assert "terum-capture update" in parsed["systemMessage"]
+        assert set(parsed.keys()) == {"systemMessage"}
+
+    def test_silent_stdout_when_no_update(self, capsys):
+        assert self._run(None, capsys).out == ""
+
+    def test_maintenance_crash_stays_fail_open(self, capsys):
+        import terum_capture.upload as u
+        with patch.object(u, "_do_upload"), \
+             patch("terum_capture.maintenance.run_daily_maintenance", side_effect=RuntimeError("boom")), \
+             pytest.raises(SystemExit) as exc:
+            u.cmd_upload()
+        assert exc.value.code == 0
+        assert capsys.readouterr().out == ""
