@@ -27,6 +27,7 @@ and you must change upload.py's strip in the same commit.
 """
 import json
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import httpx
@@ -35,7 +36,11 @@ from terum_capture.config import CONFIG_DIR, load_config
 from terum_capture.output import die
 
 # Under Claude Code's 30s UserPromptSubmit budget with margin; fail-open past it (inject nothing).
-HOOK_HTTP_TIMEOUT = 8.0
+# 15.0 is decision-walk 2026-08-02 D1 (bug-592): prod mode="conflict" answers in 7.6-8.9s, so the
+# old 8.0 budget meant the conflict lane timed out and NEVER fired end-to-end. httpx float timeout
+# is per-operation (connect/read/write each), not wall-clock; the installed hook's 30s entry and
+# Claude Code's own budget are the hard backstop, and a killed hook still fails open.
+HOOK_HTTP_TIMEOUT = 15.0
 
 # Substring that identifies our delivery-hook command in settings.json, for idempotent install/remove.
 DELIVERY_HOOK_MARKER = "terum_capture delivery-hook"
@@ -50,15 +55,34 @@ _MAX_ITEM_CHARS = 220
 # Echo-loop guard markers (see module docstring — upload.py strips blocks led by these).
 CONTEXT_MARKER = "[Terum team context]"
 REMINDER_MARKER = "[Terum reminder]"
+DECISION_MARKER = "[Terum decision check]"
 
 INSTRUCTION_EVERY_N = 5
+# Single line by construction: upload.py's strip drops marker-LED lines, so an internal
+# newline would leak the tail of the instruction into the captured prompt.
 SELF_CHECK_INSTRUCTION = (
-    f"{REMINDER_MARKER} As you work: before acting on any non-trivial decision YOU make this "
-    "session (a library, schema, architecture, or destructive/hard-to-reverse choice), state it "
-    "in one sentence and call the check_decision MCP tool with it. Call search_team_knowledge "
-    "when you need what the team already knows, discussed, or decided — the repo alone won't "
-    "have it."
+    f"{REMINDER_MARKER} As you work: before any architecture, library, schema, billing, or "
+    "build-vs-buy decision you make this session — and before scaffolding any new service or "
+    "module — state it in plain language and call the check_decision MCP tool with it, BEFORE "
+    "writing any code. If it returns a standing decision that genuinely conflicts: STOP, do "
+    "not write code — present the conflict (the decision, who made it, when, and the "
+    "reasoning), then ask how to proceed. If no candidate genuinely conflicts, say nothing "
+    "about the check. Call search_team_knowledge when you need what the team already knows, "
+    "discussed, or decided — the repo alone won't have it."
 )
+
+# Conflict-lane preamble — NEUTRAL BY DESIGN. Live probes (2026-08-01) show true conflict
+# prompts score 0.62-0.67 similarity, but ALIGNED prompts (agreeing with a decision) also
+# surface their decision at ~0.55-0.58 — so a candidate is a MAYBE, never a verdict. The
+# wording instructs the model to judge silently, never asserts a conflict exists. One line
+# by construction (same strip rationale as SELF_CHECK_INSTRUCTION).
+CONFLICT_PREAMBLE = (
+    f"{DECISION_MARKER} A standing team decision may bear on this request — judge silently "
+    "whether what the user is asking conflicts with it. If it genuinely conflicts: STOP "
+    "before writing code, surface the decision (who made it, when, why), and ask how to "
+    "proceed. If it aligns or is unrelated, proceed and do not mention this check."
+)
+_MAX_CONFLICT_ITEMS = 3
 
 # Per-session prompt counter for instruction dosing. Insertion-ordered dict, pruned to the
 # newest _STATE_MAX_SESSIONS entries so the file can't grow unbounded.
@@ -122,8 +146,11 @@ def _format_context(output: dict | None) -> str | None:
     SearchKnowledgeOutput shape (Terum-MVP lib/mcp/search.ts): results[].summary/topic/owner."""
     if not output:
         return None
+    results = output.get("results")
+    if not isinstance(results, list):
+        return None  # bug-594: a truthy non-list (e.g. {"results": 1}) must fail open, not raise
     lines: list[str] = []
-    for item in (output.get("results") or [])[:_MAX_ITEMS]:
+    for item in results[:_MAX_ITEMS]:
         if not isinstance(item, dict):
             continue
         # Flatten to ONE line: prod summaries are multi-line markdown, and a bullet spanning
@@ -143,6 +170,49 @@ def _format_context(output: dict | None) -> str | None:
         f"{CONTEXT_MARKER} Your team already discussed/decided these — use if helpful, "
         "ignore if not:\n" + "\n".join(lines)
     )
+
+
+def _format_conflict(output: dict | None) -> str | None:
+    """[Terum decision check] block from a mode="conflict" /hooks/retrieve response.
+
+    Field names pinned against the live conflict shape: candidates[].decision_text/author/
+    decided_at/similarity, plus a top-level `error`. Any error in the body — or no usable
+    candidates — returns None (fail-open, inject nothing). Every emitted line starts with
+    DECISION_MARKER (echo-loop guard contract; upload.py strips these lines in the same
+    commit that introduced the marker).
+    """
+    if not output or output.get("error"):
+        return None
+    raw = output.get("candidates")
+    if not isinstance(raw, list):
+        return None  # bug-594: a truthy non-list (e.g. {"candidates": 1}) must fail open, not raise
+    candidates = [c for c in raw if isinstance(c, dict)]
+    if not candidates:
+        return None
+
+    def _sim(cand: dict) -> float:
+        try:
+            return float(cand.get("similarity") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    lines = [CONFLICT_PREAMBLE]
+    for cand in sorted(candidates, key=_sim, reverse=True)[:_MAX_CONFLICT_ITEMS]:
+        # Flatten to ONE line — same rationale as _format_context: a line not led by the
+        # marker would survive upload.py's strip and be re-captured as the user's words.
+        text = " ".join(str(cand.get("decision_text") or "").split())
+        if not text:
+            continue
+        # Flattened like decision_text (bug-593): .strip() alone keeps INTERIOR newlines, and
+        # an embedded newline in either field would put part of this entry on a physical line
+        # not led by the marker — which upload.py's strip would then keep and upload as the
+        # user's own words.
+        author = " ".join(str(cand.get("author") or "").split()) or "unknown"
+        decided = " ".join(str(cand.get("decided_at") or "").split())[:10] or "date unknown"
+        lines.append(f"{DECISION_MARKER} Decision ({author}, {decided}): {text[:_MAX_ITEM_CHARS]}")
+    if len(lines) == 1:
+        return None  # candidates present but none had usable text
+    return "\n".join(lines)
 
 
 def _instruction_due(session_id: str) -> bool:
@@ -170,22 +240,42 @@ def _instruction_due(session_id: str) -> bool:
 
 
 def run_prompt_hook() -> None:
-    """UserPromptSubmit entry point (invoked as `... delivery-hook prompt`)."""
-    config = load_config()
-    if not config or not config.get("api_key") or not config.get("api_url"):
-        return  # not set up -> nothing to retrieve AND the MCP tools aren't wired; stay silent
-    payload = _read_stdin_json()
-    prompt = str(payload.get("prompt") or payload.get("user_prompt") or "")
-    session_id = str(payload.get("session_id") or "")
+    """UserPromptSubmit entry point (invoked as `... delivery-hook prompt`).
 
-    parts: list[str] = []
-    if len(prompt.strip()) >= MIN_PROMPT_CHARS:
-        context = _format_context(_retrieve("context", prompt))
-        if context:
-            parts.append(context)
-    if _instruction_due(session_id):
-        parts.append(SELF_CHECK_INSTRUCTION)
-    _emit("UserPromptSubmit", "\n\n".join(parts) if parts else None)
+    The try/except makes the module's FAIL-OPEN guarantee structural rather than
+    per-helper (bug-594): any unexpected defect in a helper degrades to injecting
+    nothing, mirroring cmd_upload's guard around _do_upload.
+    """
+    try:
+        config = load_config()
+        if not config or not config.get("api_key") or not config.get("api_url"):
+            return  # not set up -> nothing to retrieve AND the MCP tools aren't wired; stay silent
+        payload = _read_stdin_json()
+        prompt = str(payload.get("prompt") or payload.get("user_prompt") or "")
+        session_id = str(payload.get("session_id") or "")
+
+        parts: list[str] = []
+        if len(prompt.strip()) >= MIN_PROMPT_CHARS:
+            # Two PARALLEL, INDEPENDENT retrievals: the context and conflict lanes (decision-walk
+            # 2026-08-02 D1, bug-592 — sequential lanes stacked their latencies, so the prompt
+            # paid both round-trips back to back). Each still fails open on its own (_retrieve
+            # returns None on any error, including a timeout), so a transient failure in one
+            # never suppresses the other — ~2/9 live calls errored in the 2026-08-01 probes.
+            # Injection order stays context-then-conflict regardless of which lane answers first.
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                context_future = pool.submit(_retrieve, "context", prompt)
+                conflict_future = pool.submit(_retrieve, "conflict", prompt)
+                context = _format_context(context_future.result())
+                conflict = _format_conflict(conflict_future.result())
+            if context:
+                parts.append(context)
+            if conflict:
+                parts.append(conflict)
+        if _instruction_due(session_id):
+            parts.append(SELF_CHECK_INSTRUCTION)
+        _emit("UserPromptSubmit", "\n\n".join(parts) if parts else None)
+    except Exception as exc:  # fail-open: a delivery hook must never break the user's session
+        print(f"terum-capture: delivery hook degraded (injected nothing): {exc}", file=sys.stderr)
 
 
 # --- install / uninstall in ~/.claude/settings.json -------------------------------------------

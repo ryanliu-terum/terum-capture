@@ -92,10 +92,12 @@ server, via three tools: `search_team_knowledge`, `check_decision`, `get_standin
 Delivery is pull-only — nothing is injected automatically, so these only help the team if you
 actually call them at the right moments:
 
-- Before proposing or making a non-trivial technical decision — an architecture choice, a
-  library / API / schema / auth decision, or a destructive or hard-to-reverse action — call
-  `check_decision` with the specific action you're about to take. It surfaces conflicts with
-  the team's standing decisions and is silent when nothing conflicts.
+- Before any architecture, library, schema, billing, or build-vs-buy decision — and before
+  scaffolding any new service or module — call `check_decision` with a plain-language
+  statement of what you're about to do, BEFORE writing any code.
+- If it returns a standing decision that genuinely conflicts: STOP. Do not write code.
+  Present the conflict — the decision, who made it, when, and the reasoning — then ask how
+  to proceed. If no candidate genuinely conflicts, say nothing about the check.
 - When a question is about what's already been decided, discussed, or figured out, by you OR by
   a teammate (e.g. "what did we decide about X", "are we still doing Y", the status of ongoing
   work, a prior finding), call `search_team_knowledge` first. Much of this lives ONLY in the

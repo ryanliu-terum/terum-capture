@@ -6,13 +6,25 @@ decided it. The strip removes exactly our marker blocks and nothing else.
 """
 import json
 
-from terum_capture.delivery_hooks import CONTEXT_MARKER, REMINDER_MARKER, SELF_CHECK_INSTRUCTION
+from terum_capture.delivery_hooks import (
+    CONFLICT_PREAMBLE,
+    CONTEXT_MARKER,
+    DECISION_MARKER,
+    REMINDER_MARKER,
+    SELF_CHECK_INSTRUCTION,
+)
 from terum_capture.upload import _parse_turns, _strip_delivery_injection
 
 INJECTED_BLOCK = (
     f"{CONTEXT_MARKER} Your team already discussed/decided these — use if helpful, ignore if not:\n"
     "- we use Upstash Redis for rate limits (Teddy)\n"
     "- never run supabase db push against prod (Ryan)"
+)
+
+DECISION_BLOCK = (
+    f"{CONFLICT_PREAMBLE}\n"
+    f"{DECISION_MARKER} Decision (Ryan Liu, 2026-07-28): Use Vercel Queue Functions, "
+    "not a self-hosted worker"
 )
 
 
@@ -41,6 +53,22 @@ class TestStrip:
         assert "- keep this bullet" in out and "- and this one" in out
         assert "Upstash Redis" not in out
 
+    def test_strips_decision_block_keeps_user_text(self):
+        text = f"real question before\n\n{DECISION_BLOCK}\n\nreal text after"
+        out = _strip_delivery_injection(text)
+        assert "real question before" in out
+        assert "real text after" in out
+        assert DECISION_MARKER not in out
+        assert "Vercel Queue Functions" not in out and "judge silently" not in out
+
+    def test_strips_all_three_marker_kinds_together(self):
+        text = f"do the thing\n\n{INJECTED_BLOCK}\n\n{DECISION_BLOCK}\n\n{SELF_CHECK_INSTRUCTION}"
+        out = _strip_delivery_injection(text)
+        assert "do the thing" in out
+        for marker in (CONTEXT_MARKER, DECISION_MARKER, REMINDER_MARKER):
+            assert marker not in out
+        assert "Upstash Redis" not in out and "Vercel Queue Functions" not in out
+
     def test_indented_markers_stripped(self):
         text = f"prompt\n  {REMINDER_MARKER} indented reminder\n    {CONTEXT_MARKER} hdr:\n    - item"
         out = _strip_delivery_injection(text)
@@ -67,3 +95,10 @@ class TestParseTurnsWiring:
         _, turns = _parse_turns(self._entries(INJECTED_BLOCK))
         assert len(turns) == 1
         assert turns[0][0] == ""  # prompt stripped to nothing -> response-only turn, nothing echoed
+
+    def test_decision_block_removed_from_captured_prompt(self):
+        _, turns = _parse_turns(self._entries(f"should we self-host the queue?\n\n{DECISION_BLOCK}"))
+        assert len(turns) == 1
+        prompt = turns[0][0]
+        assert prompt == "should we self-host the queue?"
+        assert "Vercel Queue Functions" not in json.dumps(turns)
