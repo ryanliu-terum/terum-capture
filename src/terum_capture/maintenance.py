@@ -3,10 +3,12 @@
 Two jobs, both best-effort — every failure is swallowed so this can never delay or
 break capture, and it runs at most once per 24h (guarded by a timestamp file):
 
-  (C) Self-heal the hook config: re-apply ``_configure_hook()`` so a stale
-      ~/.claude/settings.json (e.g. an old 15s Stop-hook timeout left behind when the
-      package was upgraded but ``setup`` never re-run) converges to whatever the
-      INSTALLED package specifies — no user action needed.
+  (C) Self-heal the hook config: re-apply ``_refresh_installed_hooks()`` so a stale hook
+      entry (e.g. an old 15s Stop-hook timeout left behind when the package was upgraded
+      but ``setup`` never re-run) converges to whatever the INSTALLED package specifies —
+      no user action needed. Refresh-only: it repairs the scopes that already have a hook
+      (global and/or this project) and never installs one, so a background upkeep pass can
+      never widen a project-scoped capture into machine-wide capture.
 
   (B) Staleness check: ask the server for the latest published version, sending our own
       version for fleet telemetry. If we are behind, record a marker (surfaced by
@@ -78,8 +80,8 @@ def read_update_available() -> str | None:
 
 def _self_heal_hook() -> None:
     try:
-        from terum_capture.commands import _configure_hook
-        _configure_hook()
+        from terum_capture.commands import _refresh_installed_hooks
+        _refresh_installed_hooks()
     except Exception:
         pass
 

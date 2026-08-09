@@ -13,6 +13,7 @@ Terum-MVP's `.planning/specs/` that was written and locked upstream. Implement w
 **What this is:** a Python CLI that installs a Claude Code `Stop` hook, parses new turns out of
 Claude Code transcripts, and POSTs them to Terum's ingest pipeline. It is `pipx`-installed on real
 developer machines and **runs supervised, as a hook**. Both of those shape every rule below.
+The CLI is machine-wide; the hook it installs is **per-project by default** (invariant 7).
 
 ---
 
@@ -79,6 +80,12 @@ Claude Code prompt after the next branch switch. `tests/conftest.py` has an **au
 `isolate_home` fixture that monkeypatches every `~`-rooted constant at its module to a `tmp_path`.
 
 **If you add a new `~`-rooted module constant, patch it into `isolate_home` in the same commit.**
+The fixture also `chdir`s each test into a throwaway project dir, because project-scoped capture
+resolves a second family of real paths from the **current directory** (`.claude/settings.local.json`,
+`CLAUDE.local.md`, `.gitignore`) and pytest's cwd is this checkout — so a developer who ran `setup`
+here would otherwise have the suite rewriting their own live hook. A test needing a different cwd
+must `monkeypatch.chdir` explicitly. Note that CI's `$HOME` fingerprint cannot see this second
+family at all; the tests are the only guard.
 CI fingerprints `$HOME` before and after the suite and fails on any diff. The watchlist
 (`scripts/home-watchlist.txt`) is the single source of truth for both that script and
 `tests/test_home_isolation_coverage.py`, which fails if a `Path.home()` constant in `src/` names an
@@ -105,6 +112,24 @@ Any error — no config, unreachable backend, timeout, bad payload — must degr
 nothing. It runs on `UserPromptSubmit`, so a raise or a slow path blocks the user's prompt. Its
 swallowed errors are **deliberate and load-bearing**; do not "fix" them into raises. Read the module
 docstring before touching it.
+
+### 7. Only `setup` may widen capture's scope
+
+Capture is **per-project by default**: `setup` writes the Stop hook to `<project>/.claude/settings.local.json`
+(git-ignored), and `--global` is an explicit opt-in to the machine-wide `~/.claude/settings.json`.
+Authoritative: the `_scope_targets` and `_refresh_installed_hooks` docstrings in `commands.py`.
+
+The consequence that is easy to undo by accident: every OTHER path that writes a hook is
+**refresh-only**. `setup-hook` (which `terum-capture update` runs on every upgrade) and the daily
+self-heal in `maintenance.py` both go through `_refresh_installed_hooks()`, which re-applies the
+canonical entry to the scopes that already have one and **creates none**. Calling `_configure_hook()`
+directly from either — the shape they had when global was the only scope — silently hands a
+machine-wide hook to a user who deliberately picked one project, re-arming capture for every repo
+on their box with no prompt. Pinned by `TestRefreshInstalledHooks` in `tests/test_project_scope.py`.
+
+Deliberately still global, and not a violation: the pipx CLI itself, the API key in
+`~/.terum/config.json`, MCP (`~/.claude.json`), and the delivery hook. The last two are read-only
+*pulls* of team knowledge, not capture.
 
 ---
 

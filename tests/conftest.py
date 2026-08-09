@@ -47,6 +47,17 @@ def isolate_home(tmp_path, monkeypatch):
     monkeypatch.setattr(upload, "TERUM_DIR", terum)
     monkeypatch.setattr(delivery_hooks, "STATE_FILE", terum / "delivery_state.json")
 
+    # Project-scoped capture added a SECOND family of real paths the suite can write: the
+    # scope targets are resolved from the CURRENT DIRECTORY (`.claude/settings.local.json`,
+    # `CLAUDE.local.md`, `.gitignore`), and pytest's cwd is this checkout. So a developer who
+    # runs `terum-capture setup` here — which the picker actively invites, the current
+    # directory being its default — would have the suite rewriting the very hook file their
+    # own sessions load. Same bug class as the ~ constants above, same fix, applied once:
+    # every test runs in a throwaway project dir unless it deliberately chdirs elsewhere.
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+
     # _CallbackHandler.result is CLASS state that survives between tests, so whichever OAuth-callback
     # test ran last decides which branch `wait_for_callback` takes in the next one. That made a
     # stderr test pass alone and fail in-suite. Reset it so ordering cannot leak.

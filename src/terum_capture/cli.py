@@ -42,6 +42,8 @@ def main():
         from terum_capture.commands import cmd_setup
         url = None
         token = None
+        use_global = False
+        projects: list[str] = []
         mcp = None
         delivery = None
         i = 1
@@ -52,6 +54,12 @@ def main():
             elif args[i] == "--token" and i + 1 < len(args):
                 token = args[i + 1]
                 i += 2
+            elif args[i] == "--project" and i + 1 < len(args):
+                projects.append(args[i + 1])  # repeatable: --project A --project B
+                i += 2
+            elif args[i] == "--global":
+                use_global = True
+                i += 1
             elif args[i] == "--mcp":
                 mcp = True
                 i += 1
@@ -66,7 +74,14 @@ def main():
                 i += 1
             else:
                 i += 1
-        cmd_setup(api_url=url, token=token, mcp=mcp, delivery=delivery)
+        cmd_setup(
+            api_url=url,
+            token=token,
+            use_global=use_global,
+            projects=projects or None,
+            mcp=mcp,
+            delivery=delivery,
+        )
 
     elif command == "status":
         from terum_capture.commands import cmd_status
@@ -82,7 +97,15 @@ def main():
 
     elif command == "logout":
         from terum_capture.commands import cmd_logout
-        cmd_logout()
+        project = None
+        i = 1
+        while i < len(args):
+            if args[i] == "--project" and i + 1 < len(args):
+                project = args[i + 1]
+                i += 2
+            else:
+                i += 1
+        cmd_logout(use_global="--global" in args[1:], project=project)
 
     elif command == "delivery-hook":
         # Invoked by the Claude Code hook itself (reads the hook payload from stdin), like

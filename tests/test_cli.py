@@ -26,7 +26,7 @@ class TestSetupMcpFlagWiring:
     def test_no_flags_passes_none(self, monkeypatch):
         recorded = {}
 
-        def fake_cmd_setup(api_url=None, token=None, mcp=None, delivery=None):
+        def fake_cmd_setup(api_url=None, token=None, use_global=False, projects=None, mcp=None, delivery=None):
             recorded["mcp"] = mcp
             recorded["api_url"] = api_url
             recorded["token"] = token
@@ -45,7 +45,7 @@ class TestSetupMcpFlagWiring:
         recorded = {}
         monkeypatch.setattr(
             commands, "cmd_setup",
-            lambda api_url=None, token=None, mcp=None, delivery=None: recorded.update(mcp=mcp, delivery=delivery),
+            lambda api_url=None, token=None, use_global=False, projects=None, mcp=None, delivery=None: recorded.update(mcp=mcp, delivery=delivery),
         )
 
         run_cli(monkeypatch, ["setup", "--mcp"])
@@ -56,7 +56,7 @@ class TestSetupMcpFlagWiring:
         recorded = {}
         monkeypatch.setattr(
             commands, "cmd_setup",
-            lambda api_url=None, token=None, mcp=None, delivery=None: recorded.update(mcp=mcp, delivery=delivery),
+            lambda api_url=None, token=None, use_global=False, projects=None, mcp=None, delivery=None: recorded.update(mcp=mcp, delivery=delivery),
         )
 
         run_cli(monkeypatch, ["setup", "--no-mcp"])
@@ -66,7 +66,7 @@ class TestSetupMcpFlagWiring:
     def test_mcp_flag_combined_with_url_and_token(self, monkeypatch):
         recorded = {}
 
-        def fake_cmd_setup(api_url=None, token=None, mcp=None, delivery=None):
+        def fake_cmd_setup(api_url=None, token=None, use_global=False, projects=None, mcp=None, delivery=None):
             recorded["api_url"] = api_url
             recorded["token"] = token
             recorded["mcp"] = mcp
@@ -198,7 +198,10 @@ class TestExistingCommandsUnaffected:
 
     def test_logout_still_dispatches(self, monkeypatch):
         called = {}
-        monkeypatch.setattr(commands, "cmd_logout", lambda: called.setdefault("hit", True))
+        monkeypatch.setattr(
+            commands, "cmd_logout",
+            lambda use_global=False, project=None: called.setdefault("hit", True),
+        )
 
         run_cli(monkeypatch, ["logout"])
 
@@ -220,7 +223,7 @@ class TestSetupDeliveryFlagWiring:
         recorded = {}
         monkeypatch.setattr(
             commands, "cmd_setup",
-            lambda api_url=None, token=None, mcp=None, delivery=None: recorded.update(delivery=delivery),
+            lambda api_url=None, token=None, use_global=False, projects=None, mcp=None, delivery=None: recorded.update(delivery=delivery),
         )
         return recorded
 
