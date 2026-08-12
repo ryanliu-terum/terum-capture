@@ -26,6 +26,35 @@ class TestInstallManagerDetection:
              patch.object(u.sys, "prefix", "/home/x/project/.venv"):
             assert u._pipx_manages_this() is False
 
+    def test_uv_branch_when_prefix_is_a_uv_tool_venv(self):
+        which = lambda name: "/opt/homebrew/bin/uv" if name == "uv" else None
+        with patch.object(u.shutil, "which", which), \
+             patch.object(u.sys, "prefix", "/home/x/.local/share/uv/tools/terum-capture"):
+            assert u._uv_manages_this() is True
+            cmd = u._reinstall_cmd()
+            assert cmd[:3] == ["uv", "tool", "install"]
+            assert "--force" in cmd and cmd[-1] == u.REPO_URL
+
+    def test_uv_branch_on_a_windows_roaming_prefix(self):
+        with patch.object(u.shutil, "which", return_value="C:\\uv.exe"), \
+             patch.object(u.sys, "prefix", "C:\\Users\\X\\AppData\\Roaming\\uv\\tools\\terum-capture"):
+            assert u._uv_manages_this() is True
+
+    def test_pip_branch_when_uv_launcher_is_absent(self):
+        # Inside a uv tool venv but no `uv` on PATH -> we cannot shell out to it;
+        # detection must fail closed to the pip branch (which will error loudly)
+        # rather than crash on a missing launcher.
+        with patch.object(u.shutil, "which", return_value=None), \
+             patch.object(u.sys, "prefix", "/home/x/.local/share/uv/tools/terum-capture"):
+            assert u._uv_manages_this() is False
+            cmd = u._reinstall_cmd()
+            assert "pip" in cmd
+
+    def test_pipx_venv_never_matches_the_uv_detector(self):
+        with patch.object(u.shutil, "which", return_value="/usr/bin/uv"), \
+             patch.object(u.sys, "prefix", "/home/x/.local/pipx/venvs/terum-capture"):
+            assert u._uv_manages_this() is False
+
 
 class TestCmdUpdate:
     _CMD = ["pipx", "install", "--force", u.REPO_URL]
