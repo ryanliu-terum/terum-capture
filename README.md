@@ -15,13 +15,23 @@ pipx install git+https://github.com/ryanliu-terum/terum-capture
 terum-capture setup
 ```
 
-Or the one-liner (checks Python, installs pipx if needed, then installs):
+Or the one-liner (checks Python, installs pipx if needed, then installs — falling back to [uv](https://docs.astral.sh/uv/) automatically if the pipx path fails):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ryanliu-terum/terum-capture/main/install.sh | bash
 ```
 
-`pipx` gives `terum-capture` one isolated, machine-wide install. The **CLI stays global**; what `setup` configures is per-project by default. The Stop hook runs through that install's Python interpreter by absolute path (`sys.executable`), so it keeps working regardless of your shell `PATH`.
+> [!WARNING]
+> **macOS 26.1/26.2 (Tahoe):** Homebrew's current `python@3.13`/`python@3.14` builds can't load `pyexpat` on these macOS versions ([Homebrew/homebrew-core#277330](https://github.com/Homebrew/homebrew-core/issues/277330)), which kills pipx's first-run bootstrap with an error like `Command '[…/pipx/shared/bin/python', '-m', 'ensurepip', …]' returned non-zero exit status 1`. This is not specific to terum-capture — any `pipx install` fails on an affected machine. Until Homebrew ships a fixed build, install with [uv](https://docs.astral.sh/uv/) instead — same end state (isolated venv, `terum-capture` on your `PATH`), and `terum-capture update` works normally afterwards:
+>
+> ```bash
+> brew install uv
+> uv tool install --managed-python git+https://github.com/ryanliu-terum/terum-capture
+> ```
+>
+> The one-liner above detects the failure and applies this fallback for you.
+
+`pipx` (or `uv tool`) gives `terum-capture` one isolated, machine-wide install. The **CLI stays global**; what `setup` configures is per-project by default. The Stop hook runs through that install's Python interpreter by absolute path (`sys.executable`), so it keeps working regardless of your shell `PATH`.
 
 After installing, run `terum-capture setup` and **pick the project(s) to capture** from the prompt (the current directory is the default), then **start a new Claude Code session** in one of them — existing sessions won't have the hook loaded yet.
 

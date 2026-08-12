@@ -6,8 +6,9 @@ subprocess to rewrite the Stop-hook config — so a shipped change to the hook t
 or command actually reaches the user's ~/.claude/settings.json. The running process
 keeps its old code in memory; that is fine, it exits right after.
 
-The version string is frozen historically (0.1.0 forever), so a plain `pipx upgrade`
-would no-op; we force a reinstall from git HEAD regardless of the reported version.
+Release versions don't bump on every commit (and were frozen at 0.1.0 historically),
+so a plain `pipx upgrade` could no-op; we force a reinstall from git HEAD regardless
+of the reported version.
 """
 import shutil
 import subprocess
@@ -33,10 +34,27 @@ def _pipx_manages_this() -> bool:
     return "/pipx/venvs/" in prefix
 
 
+def _uv_manages_this() -> bool:
+    """True when this interpreter lives inside a uv tool venv.
+
+    ``uv tool install`` places each tool in ``.../uv/tools/<app>/``. uv tool venvs
+    are created WITHOUT pip, so the pip branch below would die with "No module
+    named pip" — updates must shell out to ``uv`` itself.
+    """
+    if not shutil.which("uv"):
+        return False
+    prefix = sys.prefix.replace("\\", "/").lower()
+    return "/uv/tools/" in prefix
+
+
 def _reinstall_cmd() -> list[str]:
     if _pipx_manages_this():
-        # --force reinstalls even though pipx thinks the (frozen) version is current.
+        # --force reinstalls even though pipx thinks the (unchanged) version is current.
         return ["pipx", "install", "--force", REPO_URL]
+    if _uv_manages_this():
+        # Mirrors the pipx branch. uv re-resolves the interpreter on --force,
+        # preferring its managed Pythons when any are installed.
+        return ["uv", "tool", "install", "--force", REPO_URL]
     # pip branch: --force-reinstall because the version string may not have changed.
     return [sys.executable, "-m", "pip", "install", "--upgrade", "--force-reinstall", REPO_URL]
 
