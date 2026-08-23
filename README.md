@@ -8,28 +8,21 @@ Capture is **project-scoped**. When you run `setup` interactively, it lists your
 
 ## Install
 
-**Requirements:** Python 3.10+ and [`pipx`](https://pipx.pypa.io/) (`brew install pipx` on macOS).
-
-```bash
-pipx install git+https://github.com/ryanliu-terum/terum-capture
-terum-capture setup
-```
-
-Or the one-liner (checks Python, installs pipx if needed, then installs — falling back to [uv](https://docs.astral.sh/uv/) automatically if the pipx path fails):
+One command — it finds a Python ≥ 3.10, installs pipx if needed, and automatically falls back to [uv](https://docs.astral.sh/uv/) with a self-contained Python when the pipx path can't work:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ryanliu-terum/terum-capture/main/install.sh | bash
+terum-capture setup
 ```
 
-> [!WARNING]
-> **macOS 26.1/26.2 (Tahoe):** Homebrew's current `python@3.13`/`python@3.14` builds can't load `pyexpat` on these macOS versions ([Homebrew/homebrew-core#277330](https://github.com/Homebrew/homebrew-core/issues/277330)), which kills pipx's first-run bootstrap with an error like `Command '[…/pipx/shared/bin/python', '-m', 'ensurepip', …]' returned non-zero exit status 1`. This is not specific to terum-capture — any `pipx install` fails on an affected machine. Until Homebrew ships a fixed build, install with [uv](https://docs.astral.sh/uv/) instead — same end state (isolated venv, `terum-capture` on your `PATH`), and `terum-capture update` works normally afterwards:
->
-> ```bash
-> brew install uv
-> uv tool install --managed-python git+https://github.com/ryanliu-terum/terum-capture
-> ```
->
-> The one-liner above detects the failure and applies this fallback for you.
+**Alternative** — if you prefer to run the tools yourself (requires Python 3.10+ and [`pipx`](https://pipx.pypa.io/)):
+
+```bash
+pipx install git+https://github.com/ryanliu-terum/terum-capture
+```
+
+> [!NOTE]
+> **macOS 26.1/26.2 (Tahoe):** bare `pipx install` fails outright on these versions — every Homebrew Python is broken (`platform.mac_ver()` returns empty, the same defect family as [Homebrew/homebrew-core#277330](https://github.com/Homebrew/homebrew-core/issues/277330)), and pipx ≥ 1.16 creates venvs through uv, which refuses a broken interpreter. This is not specific to terum-capture. Use the one-liner above (it falls back to uv automatically), or directly: `uv tool install --managed-python git+https://github.com/ryanliu-terum/terum-capture` — same end state (isolated venv, `terum-capture` on your `PATH`), and `terum-capture update` works normally afterwards.
 
 `pipx` (or `uv tool`) gives `terum-capture` one isolated, machine-wide install. The **CLI stays global**; what `setup` configures is per-project by default. The Stop hook runs through that install's Python interpreter by absolute path (`sys.executable`), so it keeps working regardless of your shell `PATH`.
 
