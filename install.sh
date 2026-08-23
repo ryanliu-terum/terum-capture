@@ -117,10 +117,5 @@ fi
 rm -f "$LOG"
 
 echo
-info "terum-capture installed."
-echo
-echo "Next step — run setup (opens your browser to log in):"
-echo
-echo "    terum-capture setup"
-echo
-echo "If 'terum-capture' is not found, restart your shell (the installer updated your PATH)."
+info "terum-capture installed — run 'terum-capture setup' to link to your Terum account."
+echo "(If 'terum-capture' is not found, restart your shell — the installer updated your PATH.)"
