@@ -1,0 +1,55 @@
+name: Release
+
+# Publishes to PyPI when a GitHub release is published. Uses PyPI trusted
+# publishing (OIDC) — no long-lived API token lives in this repo's secrets.
+#
+# One-time setup before this workflow can succeed: register this repo +
+# workflow as a trusted publisher for the `terum-capture` project on PyPI
+# (the name is unclaimed as of 2026-09-01 — first publish claims it).
+# Until that's done, the publish step fails closed with a clear OIDC error;
+# it cannot accidentally publish anywhere.
+on:
+  release:
+    types: [published]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install build
+          python -m build
+      # Fail here, before publish, if the tag and __version__ disagree —
+      # hatch reads the version from src/terum_capture/__init__.py, so a
+      # mismatch means someone tagged without bumping (or vice versa).
+      - name: Check tag matches package version
+        run: |
+          pkg_version=$(python -c "import pathlib,re; print(re.search(r'__version__ = \"(.+?)\"', pathlib.Path('src/terum_capture/__init__.py').read_text()).group(1))")
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$pkg_version" != "$tag" ]; then
+            echo "::error::tag v$tag != __version__ $pkg_version" && exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # OIDC for PyPI trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

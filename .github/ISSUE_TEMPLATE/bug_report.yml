@@ -1,0 +1,50 @@
+name: Bug report
+description: Something broke — install, setup, capture, or update
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: terum-capture version
+      description: Output of `terum-capture --version`
+      placeholder: "0.6.1"
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: OS and Python version (`python3 --version`)
+      placeholder: "macOS 26.2, Python 3.12.4"
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - install.sh / installation
+        - setup / project picker
+        - capture (Stop hook / missing sessions)
+        - update / self-updater
+        - delivery hook (UserPromptSubmit)
+        - other
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: >
+        What you did, what you expected, and what happened instead. Paste
+        terminal output if you have it — but scrub anything you don't want
+        public (transcript content, tokens, URLs with IDs).
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
