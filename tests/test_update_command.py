@@ -7,13 +7,20 @@ import pytest
 import terum_capture.updater as u
 
 
+def test_update_installs_from_pypi_not_git():
+    # Releases publish to PyPI as of 0.7.0 and the update nag fires on release
+    # versions, so `update` must track PyPI releases — a git spec here would
+    # silently ship unreleased HEAD to every nagged user again.
+    assert u.PACKAGE_SPEC == "terum-capture"
+
+
 class TestInstallManagerDetection:
     def test_pipx_branch_when_prefix_is_a_pipx_venv(self):
         with patch.object(u.shutil, "which", return_value="/usr/bin/pipx"), \
              patch.object(u.sys, "prefix", "/home/x/.local/pipx/venvs/terum-capture"):
             assert u._pipx_manages_this() is True
             cmd = u._reinstall_cmd()
-            assert cmd[0] == "pipx" and "--force" in cmd and cmd[-1] == u.REPO_URL
+            assert cmd[0] == "pipx" and "--force" in cmd and cmd[-1] == u.PACKAGE_SPEC
 
     def test_pip_branch_when_pipx_absent(self):
         with patch.object(u.shutil, "which", return_value=None):
@@ -33,7 +40,7 @@ class TestInstallManagerDetection:
             assert u._uv_manages_this() is True
             cmd = u._reinstall_cmd()
             assert cmd[:3] == ["uv", "tool", "install"]
-            assert "--force" in cmd and cmd[-1] == u.REPO_URL
+            assert "--force" in cmd and cmd[-1] == u.PACKAGE_SPEC
 
     def test_uv_branch_on_a_windows_roaming_prefix(self):
         with patch.object(u.shutil, "which", return_value="C:\\uv.exe"), \
@@ -57,7 +64,7 @@ class TestInstallManagerDetection:
 
 
 class TestCmdUpdate:
-    _CMD = ["pipx", "install", "--force", u.REPO_URL]
+    _CMD = ["pipx", "install", "--force", u.PACKAGE_SPEC]
 
     def test_success_reinstalls_then_refreshes_hook(self, capsys):
         ok = MagicMock(returncode=0)

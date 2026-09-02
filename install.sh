@@ -3,8 +3,8 @@
 # terum-capture installer
 # Usage: curl -fsSL https://raw.githubusercontent.com/ryanliu-terum/terum-capture/main/install.sh | bash
 #
-# Installs the terum-capture CLI via pipx, falling back to uv if the pipx path
-# fails. Notably: on macOS 26.1/26.2, Homebrew Pythons are broken
+# Installs the terum-capture CLI from PyPI via pipx, falling back to uv if the
+# pipx path fails. Notably: on macOS 26.1/26.2, Homebrew Pythons are broken
 # (`platform.mac_ver()` returns empty — the same defect family as
 # Homebrew/homebrew-core#277330), so the pipx phase always fails there:
 # pipx >=1.16 creates venvs through uv, and uv refuses a broken interpreter.
@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-REPO="git+https://github.com/ryanliu-terum/terum-capture"
+PKG="terum-capture"
 LOG="$(mktemp "${TMPDIR:-/tmp}/terum-capture-install.XXXXXX")"
 
 err()  { printf '\033[31merror:\033[0m %s\n' "$1" >&2; }
@@ -61,7 +61,7 @@ install_with_pipx() {
   local pipx_cmd
   pipx_cmd="$(command -v pipx || echo "$PYBIN -m pipx")"
 
-  $pipx_cmd install --python "$PYBIN" --force "$REPO" >>"$LOG" 2>&1
+  $pipx_cmd install --python "$PYBIN" --force "$PKG" >>"$LOG" 2>&1
 }
 
 # --- install path 2: uv (fallback) -----------------------------------------
@@ -79,13 +79,8 @@ install_with_uv() {
     fi
   fi
 
-  uv tool install --managed-python --force "$REPO" >>"$LOG" 2>&1
+  uv tool install --managed-python --force "$PKG" >>"$LOG" 2>&1
 }
-
-if ! command -v git >/dev/null 2>&1; then
-  err "git is required but not found. Install git and re-run."
-  exit 1
-fi
 
 PYBIN="$(find_python || true)"
 if [ -z "${PYBIN:-}" ]; then

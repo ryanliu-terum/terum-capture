@@ -3,7 +3,7 @@ import sys
 from terum_capture.output import die
 
 COMMANDS_LINE = (
-    "Commands: upload, setup, backfill, status, update, setup-hook, logout, mcp, delivery"
+    "Commands: upload, setup, backfill, status, update, setup-hook, logout, mcp, delivery, version"
 )
 
 
@@ -15,7 +15,13 @@ def main():
 
     command = args[0]
 
-    if command == "upload":
+    if command in ("--version", "-V", "version"):
+        # SECURITY.md and the bug-report template tell reporters to paste this output,
+        # so keep it a single stable line.
+        from terum_capture import __version__
+        print(f"terum-capture {__version__}")
+
+    elif command == "upload":
         from terum_capture.upload import cmd_upload
         cmd_upload()
 
