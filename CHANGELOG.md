@@ -6,6 +6,10 @@ reconstructed from git history.
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-09-02
+
+First release published to [PyPI](https://pypi.org/project/terum-capture/).
+
 ### Added
 - Project-scoped capture by default, with an interactive project picker in
   `setup` — the hook is written into each selected repo's git-ignored
@@ -48,7 +52,8 @@ reconstructed from git history.
 - Version signaling baseline: the CLI reports its version with events and the
   backend can request an update nag, gated by a cross-repository sync check
 
-[Unreleased]: https://github.com/ryanliu-terum/terum-capture/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/ryanliu-terum/terum-capture/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/ryanliu-terum/terum-capture/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/ryanliu-terum/terum-capture/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/ryanliu-terum/terum-capture/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/ryanliu-terum/terum-capture/releases/tag/v0.5.0
