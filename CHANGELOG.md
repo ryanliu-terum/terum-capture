@@ -4,7 +4,7 @@ Notable changes to terum-capture. Format follows [Keep a Changelog](https://keep
 versions follow the tags in this repo. Entries before this file existed were
 reconstructed from git history.
 
-## [Unreleased]
+## [0.7.1] — 2026-09-04
 
 ### Added
 - `terum-capture --version` (also `-V` / `version`) — SECURITY.md and the bug
