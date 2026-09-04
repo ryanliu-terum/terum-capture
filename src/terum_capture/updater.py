@@ -1,4 +1,4 @@
-"""`terum-capture update`: reinstall the CLI from git, then refresh the hook config.
+"""`terum-capture update`: reinstall the CLI from PyPI, then refresh the hook config.
 
 Self-updating a running process is a two-step dance. We reinstall the package
 (replacing this very code on disk), then invoke the NEWLY installed code in a fresh
@@ -6,9 +6,13 @@ subprocess to rewrite the Stop-hook config — so a shipped change to the hook t
 or command actually reaches the user's ~/.claude/settings.json. The running process
 keeps its old code in memory; that is fine, it exits right after.
 
-Release versions don't bump on every commit (and were frozen at 0.1.0 historically),
-so a plain `pipx upgrade` could no-op; we force a reinstall from git HEAD regardless
-of the reported version.
+Updates install the latest release from PyPI (the package publishes there as of
+0.7.0; the backend's update nag fires on release versions, so PyPI-latest is
+exactly what the nag promises). We still FORCE the reinstall rather than trust the
+resolver's already-current short-circuit: pre-0.7.0 installs came from git with a
+version string a plain upgrade would no-op on, and `update` doubles as the repair
+path for a broken install — same venv name either way, so the force-reinstall from
+the PyPI spec cleanly replaces an old git-spec install.
 """
 import shutil
 import subprocess
@@ -17,7 +21,7 @@ import sys
 from terum_capture import __version__
 from terum_capture.output import die
 
-REPO_URL = "git+https://github.com/ryanliu-terum/terum-capture"
+PACKAGE_SPEC = "terum-capture"
 
 
 def _pipx_manages_this() -> bool:
@@ -49,18 +53,19 @@ def _uv_manages_this() -> bool:
 
 def _reinstall_cmd() -> list[str]:
     if _pipx_manages_this():
-        # --force reinstalls even though pipx thinks the (unchanged) version is current.
-        return ["pipx", "install", "--force", REPO_URL]
+        # --force reinstalls even when pipx thinks the current version is current.
+        return ["pipx", "install", "--force", PACKAGE_SPEC]
     if _uv_manages_this():
         # Mirrors the pipx branch. uv re-resolves the interpreter on --force,
         # preferring its managed Pythons when any are installed.
-        return ["uv", "tool", "install", "--force", REPO_URL]
-    # pip branch: --force-reinstall because the version string may not have changed.
-    return [sys.executable, "-m", "pip", "install", "--upgrade", "--force-reinstall", REPO_URL]
+        return ["uv", "tool", "install", "--force", PACKAGE_SPEC]
+    # pip branch: --force-reinstall so `update` still repairs an install whose
+    # version string matches PyPI-latest (see module docstring).
+    return [sys.executable, "-m", "pip", "install", "--upgrade", "--force-reinstall", PACKAGE_SPEC]
 
 
 def cmd_update():
-    print(f"terum-capture {__version__} — reinstalling from git HEAD ...")
+    print(f"terum-capture {__version__} — installing the latest release from PyPI ...")
     cmd = _reinstall_cmd()
     try:
         result = subprocess.run(cmd, timeout=300)

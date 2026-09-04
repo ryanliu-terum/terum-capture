@@ -48,6 +48,17 @@ class TestSetupScope:
         assert captured["projects"] == ["/a", "/b"]
 
 
+class TestVersionFlag:
+    # SECURITY.md and the bug-report template tell reporters to paste this output;
+    # all three spellings must print the same single stable line and exit 0.
+    def test_prints_version_line_for_every_spelling(self, monkeypatch, capsys):
+        import terum_capture
+        for spelling in ("--version", "-V", "version"):
+            monkeypatch.setattr("sys.argv", ["terum-capture", spelling])
+            cli.main()  # must not raise SystemExit
+            assert capsys.readouterr().out == f"terum-capture {terum_capture.__version__}\n"
+
+
 class TestLogoutScope:
     def test_defaults_to_project_scope(self, monkeypatch):
         captured = _run(monkeypatch, ["logout"], "cmd_logout")

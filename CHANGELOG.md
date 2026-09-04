@@ -6,6 +6,14 @@ reconstructed from git history.
 
 ## [Unreleased]
 
+### Added
+- `terum-capture --version` (also `-V` / `version`) — SECURITY.md and the bug
+  template ask for it, and the CLI had no way to print it
+
+### Changed
+- `update`, `install.sh`, and the README now install from PyPI releases instead
+  of git HEAD; git is no longer required to install
+
 ## [0.7.0] — 2026-09-02
 
 First release published to [PyPI](https://pypi.org/project/terum-capture/).
